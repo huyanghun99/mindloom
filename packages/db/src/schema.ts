@@ -311,6 +311,51 @@ export const appSettings = pgTable('app_settings', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
 });
 
+export const ragSessions = pgTable('rag_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull(),
+  spaceId: uuid('space_id'),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  query: text('query').notNull(),
+  answer: text('answer').notNull().default(''),
+  citations: jsonb('citations').$type<unknown[]>().notNull().default([]),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+}, (t) => ({
+  userIdx: index('idx_rag_sessions_user').on(t.userId, t.createdAt),
+  scopeIdx: index('idx_rag_sessions_scope').on(t.workspaceId, t.spaceId)
+}));
+
+export const shares = pgTable('shares', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  targetType: text('target_type').notNull(),
+  targetId: uuid('target_id').notNull(),
+  shareToken: text('share_token').notNull().unique(),
+  shareMode: text('share_mode').notNull().default('live'),
+  snapshotTitle: text('snapshot_title'),
+  snapshotContentJson: jsonb('snapshot_content_json').$type<unknown>(),
+  snapshotTextContent: text('snapshot_text_content'),
+  isEnabled: boolean('is_enabled').notNull().default(true),
+  createdById: uuid('created_by_id').references(() => users.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  disabledAt: timestamp('disabled_at', { withTimezone: true })
+}, (t) => ({
+  tokenIdx: uniqueIndex('uidx_shares_token').on(t.shareToken)
+}));
+
+export const backups = pgTable('backups', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  createdById: uuid('created_by_id').references(() => users.id),
+  backupType: text('backup_type').notNull().default('manual'),
+  status: text('status').notNull().default('pending'),
+  storageKey: text('storage_key'),
+  sizeBytes: integer('size_bytes'),
+  includeSecrets: boolean('include_secrets').notNull().default(false),
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp('completed_at', { withTimezone: true })
+});
+
 export const userRelations = relations(users, ({ many }) => ({
   workspaceMembers: many(workspaceMembers)
 }));

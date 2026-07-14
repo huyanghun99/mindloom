@@ -37,7 +37,8 @@ export const updatePageSchema = z.object({
   title: z.string().min(1).max(300).optional(),
   contentJson: z.unknown().optional(),
   textContent: z.string().optional(),
-  contentVersion: z.number().int().positive()
+  contentVersion: z.number().int().positive(),
+  autosave: z.boolean().default(false)
 });
 
 export const searchSchema = z.object({
@@ -58,4 +59,76 @@ export const captureSchema = z.object({
   content: z.string().default(''),
   sourceUrl: z.string().url().optional(),
   tags: z.array(z.string().min(1).max(80)).default([])
+});
+
+export const updateWorkspaceSchema = z.object({
+  name: z.string().min(1).max(120).optional()
+});
+
+export const updateSpaceSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(2000).optional(),
+  aiPrivacyPolicy: z.enum(['inherit_workspace', 'cloud_allowed', 'local_only', 'disabled']).optional(),
+  autoLlmProcessing: z.boolean().optional()
+});
+
+export const createGroupSchema = z.object({
+  workspaceId: z.string().uuid(),
+  name: z.string().min(1).max(120)
+});
+
+export const updateGroupSchema = z.object({
+  name: z.string().min(1).max(120).optional()
+});
+
+export const addGroupMemberSchema = z.object({
+  userId: z.string().uuid()
+});
+
+export const restoreRevisionSchema = z.object({
+  revisionId: z.string().uuid()
+});
+
+export const createTopicSchema = z.object({
+  workspaceId: z.string().uuid(),
+  spaceId: z.string().uuid(),
+  title: z.string().min(1).max(300),
+  contentJson: z.unknown().optional(),
+  aiSummary: z.string().max(2000).optional()
+});
+
+export const updateTopicSchema = z.object({
+  title: z.string().min(1).max(300).optional(),
+  contentJson: z.unknown().optional(),
+  status: z.enum(['accepted', 'user_edited', 'archived']).optional(),
+  updatePolicy: z.enum(['suggest_only', 'auto_draft', 'auto_publish']).optional()
+});
+
+export const createShareSchema = z.object({
+  workspaceId: z.string().uuid(),
+  targetType: z.enum(['page', 'topic']),
+  targetId: z.string().uuid(),
+  shareMode: z.enum(['live', 'snapshot']).default('live')
+});
+
+export const patchEdgeSchema = z.object({
+  relationType: z.string().min(1).max(120).optional(),
+  confidence: z.number().int().min(0).max(100).optional(),
+  status: z.enum(['suggested', 'confirmed', 'deleted']).optional()
+});
+
+export const importMarkdownSchema = z.object({
+  workspaceId: z.string().uuid(),
+  spaceId: z.string().uuid(),
+  title: z.string().min(1).max(300),
+  content: z.string().max(500000),
+  sourceUrl: z.string().url().optional()
+});
+
+export const createBackupSchema = z.object({
+  includeSecrets: z.boolean().default(false)
+});
+
+export const restoreBackupSchema = z.object({
+  backupId: z.string().uuid()
 });

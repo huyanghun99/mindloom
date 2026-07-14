@@ -22,3 +22,11 @@ export function post<T>(path: string, body: unknown): Promise<T> {
 export function put<T>(path: string, body: unknown): Promise<T> {
   return api<T>(path, { method: 'PUT', body: JSON.stringify(body) });
 }
+
+export function patch<T>(path: string, body: unknown): Promise<T> {
+  return api<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
+}
+
+export function del<T>(path: string): Promise<T> {
+  return api<T>(path, { method: 'DELETE' });
+}
