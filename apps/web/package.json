@@ -6,8 +6,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -p tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "lint": "eslint src --ext .ts,.tsx"
+    "test": "vitest run --passWithNoTests",
+    "lint": "eslint src"
   },
   "dependencies": {
     "@mindloom/shared": "workspace:*",

@@ -1,11 +1,11 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { ragAskSchema } from '@mindloom/shared';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { rateLimitMiddleware } from '../middleware/rate-limit';
 import { askRag } from '../services/rag.service';
 
-export const ragRoutes = new Hono();
+export const ragRoutes = new Hono<AppEnv>();
 ragRoutes.use('*', authMiddleware);
 ragRoutes.post('/ask', rateLimitMiddleware('rag.ask'), zValidator('json', ragAskSchema), async (c) => {
   const user = c.get('user');

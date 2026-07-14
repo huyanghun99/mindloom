@@ -1,10 +1,10 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { searchSchema } from '@mindloom/shared';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { hybridSearch } from '../services/search.service';
 
-export const searchRoutes = new Hono();
+export const searchRoutes = new Hono<AppEnv>();
 searchRoutes.use('*', authMiddleware);
 
 searchRoutes.post('/', zValidator('json', searchSchema), async (c) => {

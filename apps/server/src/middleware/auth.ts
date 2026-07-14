@@ -12,6 +12,13 @@ export interface SessionUser {
   isInstanceOwner: boolean;
 }
 
+/** Hono env bound to every route that runs after authMiddleware. */
+export type AppEnv = {
+  Variables: {
+    user: SessionUser;
+  };
+};
+
 export async function signSession(user: SessionUser): Promise<string> {
   return new SignJWT(user as any)
     .setProtectedHeader({ alg: 'HS256' })
@@ -29,9 +36,7 @@ export async function verifySession(token: string): Promise<SessionUser | null> 
   }
 }
 
-export const authMiddleware = createMiddleware<{
-  Variables: { user: SessionUser }
-}>(async (c, next) => {
+export const authMiddleware = createMiddleware<AppEnv>(async (c, next) => {
   const token = getCookie(c, 'mindloom_session') ?? c.req.header('authorization')?.replace(/^Bearer\s+/i, '');
   if (!token) return c.json({ error: 'Unauthorized' }, 401);
   const user = await verifySession(token);
@@ -40,7 +45,7 @@ export const authMiddleware = createMiddleware<{
   await next();
 });
 
-export function setSessionCookie(c: any, token: string) {
+export function setSessionCookie(c: Parameters<typeof setCookie>[0], token: string) {
   setCookie(c, 'mindloom_session', token, {
     httpOnly: true,
     sameSite: 'Lax',

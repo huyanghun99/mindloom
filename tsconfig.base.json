@@ -12,7 +12,9 @@
     "baseUrl": ".",
     "paths": {
       "@mindloom/shared": ["packages/shared/src/index.ts"],
-      "@mindloom/editor": ["packages/editor/src/index.ts"]
+      "@mindloom/editor": ["packages/editor/src/index.ts"],
+      "@mindloom/db": ["packages/db/src/index.ts"],
+      "@mindloom/ai": ["packages/ai/src/index.ts"]
     }
   }
 }
