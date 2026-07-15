@@ -1,6 +1,6 @@
 import { and, eq, or, sql } from 'drizzle-orm';
 import { db } from '../db/client';
-import { pages, spaceMembers, workspaceMembers } from '@mindloom/db';
+import { pages, spaces, spaceMembers, workspaceMembers } from '@mindloom/db';
 
 export async function canManageWorkspace(userId: string, workspaceId: string): Promise<boolean> {
   const rows = await db.select().from(workspaceMembers).where(and(
@@ -11,10 +11,27 @@ export async function canManageWorkspace(userId: string, workspaceId: string): P
   return rows.length > 0;
 }
 
+export async function canViewWorkspace(userId: string, workspaceId: string): Promise<boolean> {
+  const rows = await db.select().from(workspaceMembers).where(and(
+    eq(workspaceMembers.userId, userId),
+    eq(workspaceMembers.workspaceId, workspaceId)
+  )).limit(1);
+  return rows.length > 0;
+}
+
 export async function canViewSpace(userId: string, spaceId: string): Promise<boolean> {
   const rows = await db.select().from(spaceMembers).where(and(
     eq(spaceMembers.spaceId, spaceId),
     eq(spaceMembers.userId, userId)
+  )).limit(1);
+  return rows.length > 0;
+}
+
+export async function canManageSpace(userId: string, spaceId: string): Promise<boolean> {
+  const rows = await db.select().from(spaceMembers).where(and(
+    eq(spaceMembers.spaceId, spaceId),
+    eq(spaceMembers.userId, userId),
+    eq(spaceMembers.role, 'admin')
   )).limit(1);
   return rows.length > 0;
 }
@@ -48,4 +65,9 @@ export async function getReadableSpaceIds(userId: string, workspaceId: string): 
     WHERE sm.user_id = ${userId} AND s.workspace_id = ${workspaceId}
   `);
   return rows.rows.map((r) => r.space_id);
+}
+
+export async function getSpaceWorkspaceId(spaceId: string): Promise<string | null> {
+  const [space] = await db.select().from(spaces).where(eq(spaces.id, spaceId)).limit(1);
+  return space?.workspaceId ?? null;
 }

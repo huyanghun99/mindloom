@@ -1,16 +1,59 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pool } from './client';
 
-async function main() {
-  const sql = readFileSync(join(process.cwd(), 'src/db/migrations/0001_init.sql'), 'utf8');
-  await pool.query(sql);
-  await pool.end();
-  console.log('Migrations applied');
+const MIGRATIONS_DIR = join(process.cwd(), 'src/db/migrations');
+
+/** Idempotently apply all pending SQL migrations in order, tracked by schema_migrations. */
+export async function runMigrations(): Promise<string[]> {
+  const applied: string[] = [];
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    const { rows } = await client.query<{ filename: string }>('SELECT filename FROM schema_migrations');
+    const done = new Set(rows.map((r) => r.filename));
+
+    const files = readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+
+    for (const file of files) {
+      if (done.has(file)) continue;
+      const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
+      await client.query('BEGIN');
+      try {
+        await client.query(sql);
+        await client.query('INSERT INTO schema_migrations(filename) VALUES ($1)', [file]);
+        await client.query('COMMIT');
+        applied.push(file);
+        console.log(`Applied migration: ${file}`);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw new Error(`Migration ${file} failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return applied;
+  } finally {
+    client.release();
+  }
 }
 
-main().catch(async (err) => {
-  console.error(err);
+async function main() {
+  const applied = await runMigrations();
+  console.log(`Migrations complete. ${applied.length} applied, ${applied.length === 0 ? 'all already up to date' : applied.join(', ')}`);
   await pool.end();
-  process.exit(1);
-});
+}
+
+// Run when invoked directly, not when imported (e.g. by tests).
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(async (err) => {
+    console.error(err);
+    await pool.end();
+    process.exit(1);
+  });
+}

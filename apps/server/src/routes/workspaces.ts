@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
-import { sql } from 'drizzle-orm';
-import { createWorkspaceSchema } from '@mindloom/shared';
+import { eq, sql } from 'drizzle-orm';
+import { createWorkspaceSchema, updateWorkspaceSchema } from '@mindloom/shared';
 import { db } from '../db/client';
 import { workspaces, workspaceMembers } from '@mindloom/db';
 import { authMiddleware, type AppEnv } from '../middleware/auth';
+import { canViewWorkspace, canManageWorkspace } from '../services/permission.service';
 import { env } from '../env';
 
 export const workspaceRoutes = new Hono<AppEnv>();
@@ -32,4 +33,23 @@ workspaceRoutes.post('/', zValidator('json', createWorkspaceSchema), async (c) =
   }).returning();
   await db.insert(workspaceMembers).values({ workspaceId: workspace.id, userId: user.id, role: 'owner' });
   return c.json({ workspace }, 201);
+});
+
+workspaceRoutes.get('/:id', async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  if (!(await canViewWorkspace(user.id, id))) return c.json({ error: 'Forbidden' }, 403);
+  const [workspace] = await db.select().from(workspaces).where(eq(workspaces.id, id)).limit(1);
+  if (!workspace) return c.json({ error: 'Not found' }, 404);
+  return c.json({ workspace });
+});
+
+workspaceRoutes.patch('/:id', zValidator('json', updateWorkspaceSchema), async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id');
+  const input = c.req.valid('json');
+  if (!(await canManageWorkspace(user.id, id))) return c.json({ error: 'Forbidden' }, 403);
+  const [updated] = await db.update(workspaces).set({ ...(input.name ? { name: input.name } : {}), updatedAt: sql`now()` }).where(eq(workspaces.id, id)).returning();
+  if (!updated) return c.json({ error: 'Not found' }, 404);
+  return c.json({ workspace: updated });
 });

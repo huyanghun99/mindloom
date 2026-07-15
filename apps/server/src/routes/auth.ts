@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { setCookie } from 'hono/cookie';
 import { zValidator } from '@hono/zod-validator';
 import { eq, sql } from 'drizzle-orm';
 import { loginSchema, registerSchema } from '@mindloom/shared';
@@ -37,3 +38,8 @@ authRoutes.post('/login', zValidator('json', loginSchema), async (c) => {
 });
 
 authRoutes.get('/me', authMiddleware, async (c) => c.json({ user: c.get('user') }));
+
+authRoutes.post('/logout', authMiddleware, async (c) => {
+  setCookie(c, 'mindloom_session', '', { httpOnly: true, sameSite: 'Lax', secure: env.NODE_ENV === 'production', path: '/', maxAge: 0 });
+  return c.json({ ok: true });
+});
