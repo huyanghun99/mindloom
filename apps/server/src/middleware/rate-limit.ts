@@ -3,13 +3,19 @@ import { sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { env } from '../env';
 import { sha256 } from '../utils/crypto';
+import type { AppEnv } from './auth';
 
+/**
+ * Per-user / per-space sliding window rate limit backed by the
+ * `api_rate_limit_events` PostgreSQL table. MVP avoids Redis per
+ * the design doc; this table is the source of truth.
+ */
 export function rateLimitMiddleware(routeKey: string) {
-  return createMiddleware(async (c, next) => {
-    const user = c.get('user' as never) as any | undefined;
-    const body = c.req.method === 'POST' ? await c.req.clone().json().catch(() => ({})) : {};
-    const workspaceId = body.workspaceId ?? null;
-    const spaceId = body.spaceId ?? null;
+  return createMiddleware<AppEnv>(async (c, next) => {
+    const user = c.get('user');
+    const body = c.req.method === 'POST' ? await c.req.raw.clone().json().catch(() => ({})) : {};
+    const workspaceId = (body as { workspaceId?: string }).workspaceId ?? null;
+    const spaceId = (body as { spaceId?: string }).spaceId ?? null;
     const ipHash = sha256(c.req.header('x-forwarded-for') ?? c.req.header('cf-connecting-ip') ?? 'local');
     const userId = user?.id ?? null;
 

@@ -1,6 +1,6 @@
 import { and, eq, or, sql } from 'drizzle-orm';
 import { db } from '../db/client';
-import { pages, spaceMembers, workspaceMembers } from '../db/schema';
+import { pages, spaceMembers, workspaceMembers } from '@mindloom/db';
 
 export async function canManageWorkspace(userId: string, workspaceId: string): Promise<boolean> {
   const rows = await db.select().from(workspaceMembers).where(and(
@@ -41,7 +41,7 @@ export async function canEditPage(userId: string, pageId: string): Promise<boole
 }
 
 export async function getReadableSpaceIds(userId: string, workspaceId: string): Promise<string[]> {
-  const rows = await db.execute(sql<{ space_id: string }>`
+  const rows = await db.execute<{ space_id: string }>(sql`
     SELECT sm.space_id
     FROM space_members sm
     JOIN spaces s ON s.id = sm.space_id

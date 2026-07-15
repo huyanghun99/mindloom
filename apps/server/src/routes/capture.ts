@@ -1,14 +1,14 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { captureSchema } from '@mindloom/shared';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { db } from '../db/client';
-import { pages } from '../db/schema';
+import { pages } from '@mindloom/db';
 import { canEditSpace } from '../services/permission.service';
 import { enqueueJob } from '../services/job-runner';
 import { tokenizeChineseFriendly } from '../utils/text';
 
-export const captureRoutes = new Hono();
+export const captureRoutes = new Hono<AppEnv>();
 captureRoutes.use('*', authMiddleware);
 
 captureRoutes.post('/', zValidator('json', captureSchema), async (c) => {

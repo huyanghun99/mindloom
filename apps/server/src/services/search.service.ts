@@ -11,6 +11,7 @@ interface RankedRow {
   title: string;
   content: string;
   score: number;
+  [key: string]: unknown;
 }
 
 function rrfFuse(bm25: RankedRow[], vector: RankedRow[], limit: number): HybridSearchResult[] {

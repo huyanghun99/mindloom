@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
 import { eq, sql } from 'drizzle-orm';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { db } from '../db/client';
-import { pages, wikiTopics, llmSuggestions } from '../db/schema';
+import { pages, wikiTopics, llmSuggestions } from '@mindloom/db';
 import { canEditSpace, canViewSpace } from '../services/permission.service';
 import { getEvidenceCard, getGraphForEntity } from '../services/graph.service';
 
-export const llmWikiRoutes = new Hono();
+export const llmWikiRoutes = new Hono<AppEnv>();
 llmWikiRoutes.use('*', authMiddleware);
 
 llmWikiRoutes.get('/inbox', async (c) => {

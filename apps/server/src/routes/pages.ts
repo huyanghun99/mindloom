@@ -3,13 +3,13 @@ import { zValidator } from '@hono/zod-validator';
 import { and, eq, sql } from 'drizzle-orm';
 import { createPageSchema, updatePageSchema } from '@mindloom/shared';
 import { db } from '../db/client';
-import { pages, pageRevisions } from '../db/schema';
-import { authMiddleware } from '../middleware/auth';
+import { pages, pageRevisions } from '@mindloom/db';
+import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { canEditPage, canEditSpace, canViewPage, canViewSpace } from '../services/permission.service';
 import { enqueueJob } from '../services/job-runner';
 import { extractTextFromProseMirrorJson, tokenizeChineseFriendly } from '../utils/text';
 
-export const pageRoutes = new Hono();
+export const pageRoutes = new Hono<AppEnv>();
 pageRoutes.use('*', authMiddleware);
 
 pageRoutes.get('/', async (c) => {

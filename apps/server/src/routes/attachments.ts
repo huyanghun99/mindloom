@@ -1,13 +1,13 @@
 import { Hono } from 'hono';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { authMiddleware } from '../middleware/auth';
+import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { env } from '../env';
 import { db } from '../db/client';
-import { attachments } from '../db/schema';
+import { attachments } from '@mindloom/db';
 import { canEditPage } from '../services/permission.service';
 
-export const attachmentRoutes = new Hono();
+export const attachmentRoutes = new Hono<AppEnv>();
 attachmentRoutes.use('*', authMiddleware);
 
 attachmentRoutes.post('/upload', async (c) => {

@@ -1,13 +1,13 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { createSpaceSchema } from '@mindloom/shared';
 import { db } from '../db/client';
-import { spaces, spaceMembers } from '../db/schema';
-import { authMiddleware } from '../middleware/auth';
+import { spaces, spaceMembers } from '@mindloom/db';
+import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { canManageWorkspace } from '../services/permission.service';
 
-export const spaceRoutes = new Hono();
+export const spaceRoutes = new Hono<AppEnv>();
 spaceRoutes.use('*', authMiddleware);
 
 spaceRoutes.get('/', async (c) => {

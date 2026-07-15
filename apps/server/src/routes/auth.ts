@@ -3,12 +3,12 @@ import { zValidator } from '@hono/zod-validator';
 import { eq, sql } from 'drizzle-orm';
 import { loginSchema, registerSchema } from '@mindloom/shared';
 import { db } from '../db/client';
-import { users } from '../db/schema';
+import { users } from '@mindloom/db';
 import { env } from '../env';
 import { hashPassword, verifyPassword } from '../utils/password';
-import { signSession, setSessionCookie, authMiddleware } from '../middleware/auth';
+import { signSession, setSessionCookie, authMiddleware, type AppEnv } from '../middleware/auth';
 
-export const authRoutes = new Hono();
+export const authRoutes = new Hono<AppEnv>();
 
 authRoutes.post('/register', zValidator('json', registerSchema), async (c) => {
   const input = c.req.valid('json');

@@ -103,7 +103,7 @@ function NotesView({ workspace, space }: { workspace: Workspace; space: Space })
   </div>;
 }
 
-function LlmWikiView({ workspace, space }: { workspace: Workspace; space: Space }) {
+function LlmWikiView({ space }: { space: Space }) {
   const { data: inbox } = useQuery<{ inbox: Page[] }>({ queryKey: ['inbox', space.id], queryFn: () => api(`/api/llm-wiki/inbox?spaceId=${space.id}`) });
   const { data: topics } = useQuery<{ topics: any[] }>({ queryKey: ['topics', space.id], queryFn: () => api(`/api/llm-wiki/topics?spaceId=${space.id}`) });
   return <div className="grid2">
@@ -156,7 +156,7 @@ export function App() {
     {!workspace && <WorkspaceSetup onSelect={setWorkspace} />}
     {workspace && !space && <SpaceSetup workspace={workspace} onSelect={setSpace} />}
     {workspace && space && view === 'notes' && <NotesView workspace={workspace} space={space} />}
-    {workspace && space && view === 'wiki' && <LlmWikiView workspace={workspace} space={space} />}
+    {workspace && space && view === 'wiki' && <LlmWikiView space={space} />}
     {workspace && space && view === 'ask' && <AskView workspace={workspace} space={space} />}
   </div>;
 }
