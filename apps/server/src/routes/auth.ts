@@ -8,6 +8,7 @@ import { users } from '@mindloom/db';
 import { env } from '../env';
 import { hashPassword, verifyPassword } from '../utils/password';
 import { signSession, setSessionCookie, authMiddleware, type AppEnv } from '../middleware/auth';
+import { provisionDefaultWorkspace } from '../services/provision.service';
 
 export const authRoutes = new Hono<AppEnv>();
 
@@ -23,6 +24,12 @@ authRoutes.post('/register', zValidator('json', registerSchema), async (c) => {
     passwordHash,
     isInstanceOwner: isFirst
   }).returning();
+
+  // Auto-provision a default workspace + space + welcome page so the user
+  // can start using MindLoom immediately after registration without having
+  // to manually create scaffolding first.
+  await provisionDefaultWorkspace(user.id, user.name);
+
   const token = await signSession({ id: user.id, email: user.email, name: user.name, isInstanceOwner: user.isInstanceOwner });
   setSessionCookie(c, token);
   return c.json({ user: { id: user.id, email: user.email, name: user.name, isInstanceOwner: user.isInstanceOwner } });

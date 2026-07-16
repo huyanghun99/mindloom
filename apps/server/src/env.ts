@@ -13,6 +13,8 @@ const envSchema = z.object({
   AI_DRIVER: z.enum(['mock', 'openai', 'openai-compatible', 'ollama', 'gemini']).default('mock'),
   AI_COMPLETION_MODEL: z.string().default('mock-chat'),
   AI_EMBEDDING_MODEL: z.string().default('mock-embedding'),
+  EMBEDDING_BASE_URL: z.string().optional().default(''),
+  EMBEDDING_API_KEY: z.string().optional().default(''),
   OPENAI_API_URL: z.string().default('https://api.openai.com/v1'),
   OPENAI_API_KEY: z.string().optional().default(''),
   RAG_RATE_LIMIT_PER_USER_PER_MINUTE: z.coerce.number().int().positive().default(20),

@@ -27,7 +27,7 @@ describe('RAG eval — no-answer accuracy', () => {
 describe('RAG eval — citation format', () => {
   it('produces citations with required fields when results exist', async () => {
     vi.mocked(hybridSearch).mockResolvedValueOnce([
-      { id: 'chunk-1', pageId: 'page-1', title: 'Test Page', content: 'Some content here', source: 'both', score: 0.95 }
+      { id: 'chunk-1', pageId: 'page-1', spaceId: 'space-1', title: 'Test Page', content: 'Some content here', source: 'both', score: 0.95 }
     ]);
     const result = await askRag({
       userId: 'user-1',

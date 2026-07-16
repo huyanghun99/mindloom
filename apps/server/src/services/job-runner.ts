@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../db/client';
+import { env } from '../env';
 import { createAiProvider, vectorToSqlLiteral } from './ai.service';
 import { chunkText, tokenizeChineseFriendly } from '../utils/text';
+import { generateWikiArtifacts } from './wiki.service';
 
 export async function enqueueJob(input: {
   workspaceId?: string;
@@ -29,12 +31,31 @@ async function processPageLlm(job: any) {
 
   const ai = createAiProvider();
   const chunks = chunkText(page.text_content || '', 800, 150);
+  let embeddedCount = 0;
   for (let i = 0; i < chunks.length; i++) {
     const content = chunks[i];
-    const embedding = await ai.embed(content);
+    // Embedding is best-effort: if the vectorization endpoint is unreachable
+    // or errors, we still index the chunk with BM25 tokens so keyword/FTS
+    // search keeps working. Semantic (vector) search simply skips it.
+    let embeddingExpr: unknown = null;
+    // Always record the intended model/dimension (NOT NULL columns); the
+    // vector itself stays NULL when embedding fails, and vector search simply
+    // skips those rows via `embedding IS NOT NULL`.
+    let embeddingModel: string | null = env.AI_EMBEDDING_MODEL;
+    let embeddingDim: number | null = env.EMBEDDING_DIMENSION;
+    try {
+      const embedding = await ai.embed(content);
+      embeddingExpr = sql`${vectorToSqlLiteral(embedding)}::vector`;
+      embeddedCount++;
+    } catch (err) {
+      console.error(
+        `[index] embedding failed for page ${page.id} chunk ${i}:`,
+        err instanceof Error ? err.message : err
+      );
+    }
     await db.execute(sql`
       INSERT INTO document_chunks(workspace_id, space_id, page_id, chunk_index, title, content, fts_tokens, embedding, embedding_model, embedding_dimension)
-      VALUES (${page.workspace_id}, ${page.space_id}, ${page.id}, ${i}, ${page.title}, ${content}, ${tokenizeChineseFriendly(content)}, ${vectorToSqlLiteral(embedding)}::vector, 'mock-embedding', 1536)
+      VALUES (${page.workspace_id}, ${page.space_id}, ${page.id}, ${i}, ${page.title}, ${content}, ${tokenizeChineseFriendly(content)}, ${embeddingExpr}, ${embeddingModel}, ${embeddingDim})
     `);
   }
 
@@ -46,6 +67,17 @@ async function processPageLlm(job: any) {
   `);
 
   await db.execute(sql`UPDATE pages SET llm_process_status = 'processed', llm_processed_at = now() WHERE id = ${page.id}`);
+
+  // M5: derive candidate Topics + Suggestions from the processed page. Best
+  // effort — never let a wiki-generation failure break the indexing pipeline.
+  try {
+    await generateWikiArtifacts(page, ai);
+  } catch (err) {
+    console.error(
+      `[wiki] artifact generation failed for page ${page.id}:`,
+      err instanceof Error ? err.message : err
+    );
+  }
 }
 
 export async function runOneJob(workerId = `worker-${process.pid}`): Promise<boolean> {

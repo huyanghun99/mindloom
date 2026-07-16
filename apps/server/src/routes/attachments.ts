@@ -57,7 +57,9 @@ attachmentRoutes.get('/:id/download', async (c) => {
   if (!row) return c.json({ error: 'Not found' }, 404);
   if (!row.pageId || !(await canViewPage(user.id, row.pageId))) return c.json({ error: 'Forbidden' }, 403);
   const buffer = await readFile(join(env.UPLOAD_DIR, row.storageKey));
-  return new Response(buffer, { headers: { 'Content-Type': row.mimeType, 'Content-Disposition': `attachment; filename="${encodeURIComponent(row.fileName)}"` } });
+  const inlineable = /^image\//.test(row.mimeType) || row.mimeType === 'application/pdf';
+  const disposition = inlineable ? 'inline' : 'attachment';
+  return new Response(buffer, { headers: { 'Content-Type': row.mimeType, 'Content-Disposition': `${disposition}; filename="${encodeURIComponent(row.fileName)}"` } });
 });
 
 attachmentRoutes.delete('/:id', async (c) => {

@@ -1,13 +1,11 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { sql } from 'drizzle-orm';
 import { pool } from '../db/client';
 import { db } from '../db/client';
 
 const startedAt = Date.now();
 
-export const healthRoutes = new Hono();
-
-healthRoutes.get('/', async (c) => {
+export async function healthHandler(c: Context) {
   try {
     await pool.query('select 1');
     const { rows } = await db.execute<{ count: string }>(sql`SELECT count(*)::text FROM schema_migrations`);
@@ -23,9 +21,9 @@ healthRoutes.get('/', async (c) => {
   } catch {
     return c.json({ ok: false, service: 'mindloom-server', db: 'disconnected' }, 503);
   }
-});
+}
 
-healthRoutes.get('/diagnostics', async (c) => {
+export async function diagnosticsHandler(c: Context) {
   const logLines: string[] = [];
   logLines.push(`MindLoom Diagnostics ${new Date().toISOString()}`);
   logLines.push(`Node ${process.version} · PID ${process.pid} · Uptime ${Math.floor((Date.now() - startedAt) / 1000)}s`);
@@ -45,4 +43,9 @@ healthRoutes.get('/diagnostics', async (c) => {
     logLines.push(`Database: disconnected (${err instanceof Error ? err.message : String(err)})`);
   }
   return c.text(logLines.join('\n'));
-});
+}
+
+// Retained for backward compatibility; prefer registering healthHandler directly.
+export const healthRoutes = new Hono();
+healthRoutes.get('/', healthHandler);
+healthRoutes.get('/diagnostics', diagnosticsHandler);

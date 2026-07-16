@@ -45,7 +45,8 @@ export const searchSchema = z.object({
   workspaceId: z.string().uuid(),
   spaceId: z.string().uuid().optional(),
   query: z.string().min(1).max(1000),
-  limit: z.number().int().min(1).max(50).default(10)
+  limit: z.number().int().min(1).max(50).default(10),
+  mode: z.enum(['keyword', 'vector', 'hybrid']).default('hybrid')
 });
 
 export const ragAskSchema = searchSchema.extend({

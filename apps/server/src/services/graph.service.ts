@@ -137,3 +137,30 @@ export async function getGraphForEntity(params: { workspaceId: string; spaceId: 
   `);
   return result.rows;
 }
+
+/**
+ * M6 — when a Wiki suggestion is accepted, promote the knowledge edge(s) it
+ * implies to 'confirmed' so the graph reflects the user's decisions.
+ */
+export async function confirmEdgesForSuggestion(s: { type: string; payload: Record<string, unknown> }): Promise<void> {
+  if (s.type === 'cross_link') {
+    const p = s.payload as { sourcePageId?: string; targetPageId?: string };
+    if (p.sourcePageId && p.targetPageId) {
+      await db.execute(sql`
+        UPDATE knowledge_edges SET status = 'confirmed', updated_at = now()
+        WHERE source_type = 'page' AND source_id = ${p.sourcePageId}
+          AND target_type = 'page' AND target_id = ${p.targetPageId}
+          AND relation_type = 'related' AND status <> 'deleted'
+      `);
+    }
+  } else if (s.type === 'topic_proposal') {
+    const p = s.payload as { topicId?: string };
+    if (p.topicId) {
+      await db.execute(sql`
+        UPDATE knowledge_edges SET status = 'confirmed', updated_at = now()
+        WHERE source_type = 'topic' AND source_id = ${p.topicId}
+          AND relation_type = 'covers' AND status <> 'deleted'
+      `);
+    }
+  }
+}

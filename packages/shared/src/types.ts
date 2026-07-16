@@ -26,9 +26,11 @@ export interface RagAnswer {
 export interface HybridSearchResult {
   id: string;
   pageId: string;
+  spaceId: string;
   topicId?: string;
   title: string;
   content: string;
+  excerpt?: string;
   source: 'bm25' | 'vector' | 'both';
   score: number;
   rank?: number;

@@ -21,3 +21,4 @@ searchRoutes.post('/hybrid', zValidator('json', searchSchema), async (c) => {
   const results = await hybridSearch({ userId: user.id, ...input });
   return c.json({ results });
 });
+

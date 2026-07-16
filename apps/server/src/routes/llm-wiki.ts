@@ -7,6 +7,7 @@ import { db } from '../db/client';
 import { pages, wikiTopics, llmSuggestions, spaces } from '@mindloom/db';
 import { canEditSpace, canViewSpace, canEditPage } from '../services/permission.service';
 import { enqueueJob } from '../services/job-runner';
+import { confirmEdgesForSuggestion } from '../services/graph.service';
 
 export const llmWikiRoutes = new Hono<AppEnv>();
 llmWikiRoutes.use('*', authMiddleware);
@@ -29,6 +30,23 @@ llmWikiRoutes.post('/pages/:pageId/process-now', async (c) => {
   await db.update(pages).set({ llmProcessStatus: 'pending', llmDirtyReason: 'manual_trigger', updatedAt: sql`now()` }).where(eq(pages.id, pageId));
   await enqueueJob({ workspaceId: page.workspaceId, spaceId: page.spaceId, entityType: 'page', entityId: page.id, type: 'page.process_llm', runAfterSeconds: 0, priority: 10 });
   return c.json({ ok: true });
+});
+
+// Re-process every normal page in a space: re-indexes AND regenerates Topics /
+// Suggestions. Useful to backfill the LLM Wiki after the generator ships, or to
+// refresh artifacts for an existing corpus.
+llmWikiRoutes.post('/spaces/:spaceId/reprocess', async (c) => {
+  const user = c.get('user');
+  const spaceId = c.req.param('spaceId');
+  if (!(await canEditSpace(user.id, spaceId))) return c.json({ error: 'Forbidden' }, 403);
+  const rows = await db.execute<any>(sql`
+    SELECT id, workspace_id, space_id FROM pages WHERE space_id = ${spaceId} AND status = 'normal'
+  `);
+  for (const p of rows.rows) {
+    await db.update(pages).set({ llmProcessStatus: 'pending', llmDirtyReason: 'bulk_reprocess', updatedAt: sql`now()` }).where(eq(pages.id, p.id));
+    await enqueueJob({ workspaceId: p.workspace_id, spaceId: p.space_id, entityType: 'page', entityId: p.id, type: 'page.process_llm', runAfterSeconds: 0, priority: 10 });
+  }
+  return c.json({ ok: true, enqueued: rows.rows.length });
 });
 
 llmWikiRoutes.post('/spaces/:spaceId/pause', async (c) => {
@@ -120,6 +138,21 @@ llmWikiRoutes.post('/topics/:topicId/refresh-suggestions', async (c) => {
   return c.json({ ok: true, topicId: topic.id });
 });
 
+// Source pages that back a topic (drives the Topic Center detail view).
+llmWikiRoutes.get('/topics/:topicId/sources', async (c) => {
+  const user = c.get('user');
+  const [topic] = await db.select().from(wikiTopics).where(eq(wikiTopics.id, c.req.param('topicId'))).limit(1);
+  if (!topic) return c.json({ error: 'Not found' }, 404);
+  if (!(await canViewSpace(user.id, topic.spaceId))) return c.json({ error: 'Forbidden' }, 403);
+  const rows = await db.execute<any>(sql`
+    SELECT p.id, p.title FROM topic_sources ts
+    JOIN pages p ON p.id = ts.page_id
+    WHERE ts.topic_id = ${topic.id}
+    ORDER BY p.updated_at DESC LIMIT 50
+  `);
+  return c.json({ sources: rows.rows });
+});
+
 llmWikiRoutes.get('/suggestions', async (c) => {
   const user = c.get('user');
   const spaceId = c.req.query('spaceId');
@@ -135,6 +168,8 @@ llmWikiRoutes.post('/suggestions/:id/accept', async (c) => {
   if (!suggestion) return c.json({ error: 'Not found' }, 404);
   if (!(await canEditSpace(user.id, suggestion.spaceId))) return c.json({ error: 'Forbidden' }, 403);
   const [updated] = await db.update(llmSuggestions).set({ status: 'accepted', updatedAt: sql`now()` }).where(eq(llmSuggestions.id, c.req.param('id'))).returning();
+  // M6: accepting a cross-link / topic proposal confirms the implied graph edge.
+  try { await confirmEdgesForSuggestion(updated as unknown as { type: string; payload: Record<string, unknown> }); } catch { /* non-fatal */ }
   return c.json({ suggestion: updated });
 });
 
@@ -151,6 +186,11 @@ llmWikiRoutes.post('/suggestions/bulk-accept', async (c) => {
   const user = c.get('user');
   const body = await c.req.json<{ spaceId: string; ids: string[] }>();
   if (!(await canEditSpace(user.id, body.spaceId))) return c.json({ error: 'Forbidden' }, 403);
+  const rows = await db.execute<any>(sql`SELECT type, payload FROM llm_suggestions WHERE space_id = ${body.spaceId} AND id = ANY(${body.ids}::uuid[])`);
   await db.execute(sql`UPDATE llm_suggestions SET status = 'accepted', updated_at = now() WHERE space_id = ${body.spaceId} AND id = ANY(${body.ids}::uuid[])`);
+  // M6: confirm the implied graph edges for each accepted suggestion.
+  for (const r of rows.rows) {
+    try { await confirmEdgesForSuggestion(r as { type: string; payload: Record<string, unknown> }); } catch { /* non-fatal */ }
+  }
   return c.json({ ok: true });
 });
