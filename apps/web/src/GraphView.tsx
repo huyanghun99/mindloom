@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, post, patch } from './api';
-import { Check, X, FileText, Layers, Link2, ZoomIn, ZoomOut, Maximize2, RefreshCw } from 'lucide-react';
+import { Check, Network, X, Layers, Link2, ZoomIn, ZoomOut, Maximize2, RefreshCw } from 'lucide-react';
 
 type GNode = { id: string; type: 'page' | 'topic'; label: string };
 type GEdge = {
@@ -272,7 +272,7 @@ export function GraphView({ space, onOpenPage }: { space: SpaceLike; onOpenPage:
         {isLoading && <div className="graph-loading"><RefreshCw className="spin" size={22} /></div>}
         {!isLoading && nodes.length === 0 && (
           <div className="graph-empty">
-            <Network2 size={40} />
+            <Network size={40} />
             <p>图谱暂无数据</p>
             <span className="muted small">前往「LLM Wiki」点击「重新生成」，即可从笔记中提炼主题与关联并构建图谱。</span>
           </div>

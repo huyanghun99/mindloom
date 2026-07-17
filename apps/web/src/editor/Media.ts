@@ -1,31 +1,19 @@
-import { Node, ReactNodeViewRenderer } from '@tiptap/react';
+import { ReactNodeViewRenderer } from '@tiptap/react';
+import { createMindloomBlock } from './blockContract';
 import { VideoView, AudioView, PdfView, FileCardView } from './MediaViews';
 
 function mediaNode(name: string, kind: 'video' | 'audio' | 'pdf' | 'file', View: typeof VideoView) {
-  return Node.create({
+  return createMindloomBlock({
     name,
-    group: 'block',
-    atom: true,
-    draggable: true,
-    selectable: true,
-    addAttributes() {
-      return {
-        src: { default: '' },
-        attachmentId: { default: null },
-        fileName: { default: '' },
-        mimeType: { default: '' },
-        size: { default: null }
-      };
-    },
-    parseHTML() {
-      return [{ tag: `div[data-type="${kind}"]` }];
-    },
-    renderHTML({ HTMLAttributes }) {
-      return ['div', { 'data-type': kind, ...HTMLAttributes }];
-    },
-    addNodeView() {
-      return ReactNodeViewRenderer(View);
-    }
+    dataType: kind,
+    addAttributes: () => ({
+      src: { default: '' },
+      attachmentId: { default: null },
+      fileName: { default: '' },
+      mimeType: { default: '' },
+      size: { default: null }
+    }),
+    addNodeView: () => ReactNodeViewRenderer(View)
   });
 }
 

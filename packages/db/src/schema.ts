@@ -45,6 +45,20 @@ export const workspaces = pgTable('workspaces', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
 });
 
+export const sessions = pgTable('sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull().unique(),
+  userAgent: text('user_agent'),
+  ipAddress: text('ip_address'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true })
+}, (t) => ({
+  userIdx: index('idx_sessions_user').on(t.userId)
+}));
+
 export const workspaceMembers = pgTable('workspace_members', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
@@ -94,6 +108,7 @@ export const pages = pgTable('pages', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   spaceId: uuid('space_id').notNull().references(() => spaces.id, { onDelete: 'cascade' }),
   parentPageId: uuid('parent_page_id'),
+  position: integer('position').notNull().default(0),
   title: text('title').notNull(),
   contentJson: jsonb('content_json').$type<unknown>().notNull().default({ type: 'doc', content: [] }),
   textContent: text('text_content').notNull().default(''),
@@ -273,6 +288,8 @@ export const jobs = pgTable('jobs', {
   entityId: uuid('entity_id'),
   type: text('type').notNull(),
   payload: jsonb('payload').$type<Record<string, unknown>>().notNull().default({}),
+  sourceVersion: integer('source_version'),
+  dedupeKey: text('dedupe_key'),
   status: jobStatusEnum('status').notNull().default('pending'),
   priority: integer('priority').notNull().default(100),
   runAfter: timestamp('run_after', { withTimezone: true }).notNull().defaultNow(),
@@ -288,7 +305,8 @@ export const jobs = pgTable('jobs', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
 }, (t) => ({
   runnerIdx: index('idx_jobs_runner').on(t.status, t.runAfter, t.priority),
-  scopeIdx: index('idx_jobs_scope').on(t.workspaceId, t.spaceId)
+  scopeIdx: index('idx_jobs_scope').on(t.workspaceId, t.spaceId),
+  dedupeIdx: uniqueIndex('uidx_jobs_dedupe').on(t.dedupeKey).where(sql`dedupe_key IS NOT NULL AND status IN ('pending','running')`)
 }));
 
 export const apiRateLimitEvents = pgTable('api_rate_limit_events', {

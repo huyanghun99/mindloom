@@ -1,3 +1,14 @@
+export class ApiError extends Error {
+  status: number;
+  data: unknown;
+  constructor(message: string, status: number, data: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.data = data;
+  }
+}
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     credentials: 'include',
@@ -6,11 +17,16 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   });
   if (!res.ok) {
     let message = res.statusText;
+    let data: unknown = null;
     try {
-      const body = await res.json();
-      message = body.error ?? body.message ?? message;
-    } catch {}
-    throw new Error(message);
+      data = await res.json();
+      message = (data as { error?: string; message?: string })?.error
+        ?? (data as { error?: string; message?: string })?.message
+        ?? message;
+    } catch {
+      // non-JSON error body
+    }
+    throw new ApiError(message, res.status, data);
   }
   return res.json() as Promise<T>;
 }

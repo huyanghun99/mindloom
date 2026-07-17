@@ -1,6 +1,8 @@
 import { useState } from 'react';
-import { Node, mergeAttributes, NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from '@tiptap/react';
-import { Link2, ExternalLink } from 'lucide-react';
+import { ReactNodeViewRenderer, type NodeViewProps } from '@tiptap/react';
+import { ExternalLink, Pencil } from 'lucide-react';
+import { createMindloomBlock } from './blockContract';
+import { BlockFrame } from './BlockFrame';
 
 function providerOf(url: string): string {
   try {
@@ -16,7 +18,7 @@ function providerOf(url: string): string {
   }
 }
 
-function EmbedView({ node, updateAttributes }: NodeViewProps) {
+function EmbedView({ node, updateAttributes, selected, deleteNode }: NodeViewProps) {
   const url = (node.attrs.url as string) || '';
   const [editing, setEditing] = useState(!url);
   const [draft, setDraft] = useState(url);
@@ -28,17 +30,21 @@ function EmbedView({ node, updateAttributes }: NodeViewProps) {
     setEditing(false);
   };
 
+  const actions = (
+    <>
+      <button type="button" className="ml-block-action" onMouseDown={(e) => { e.preventDefault(); setDraft(url); setEditing((v) => !v); }}>
+        <Pencil size={13} /> {editing ? '完成' : '编辑'}
+      </button>
+      {valid && (
+        <a className="ml-block-action" href={url} target="_blank" rel="noopener noreferrer" onMouseDown={(e) => e.stopPropagation()}>
+          <ExternalLink size={13} /> 打开
+        </a>
+      )}
+    </>
+  );
+
   return (
-    <NodeViewWrapper className="embed-block" data-drag-handle>
-      <div className="embed-bar" contentEditable={false}>
-        <span className="embed-badge"><Link2 size={13} /> {provider}</span>
-        <button type="button" className="embed-act" onMouseDown={(e) => { e.preventDefault(); setDraft(url); setEditing((v) => !v); }}>{editing ? '完成' : '编辑'}</button>
-        {valid && (
-          <a className="embed-act" href={url} target="_blank" rel="noopener noreferrer" onMouseDown={(e) => e.stopPropagation()}>
-            <ExternalLink size={13} /> 打开
-          </a>
-        )}
-      </div>
+    <BlockFrame label="嵌入网页" kind="embed" id={node.attrs.id} selected={selected} onDelete={() => deleteNode?.()} actions={actions}>
       {editing ? (
         <div className="embed-edit" onMouseDown={(e) => e.stopPropagation()}>
           <input className="embed-input" value={draft} placeholder="https://…"
@@ -52,29 +58,16 @@ function EmbedView({ node, updateAttributes }: NodeViewProps) {
       ) : (
         <div className="embed-invalid">无效的嵌入地址</div>
       )}
-    </NodeViewWrapper>
+    </BlockFrame>
   );
 }
 
-export const Embed = Node.create({
+export const Embed = createMindloomBlock({
   name: 'embed',
-  group: 'block',
-  atom: true,
-  draggable: true,
-  selectable: true,
-  addAttributes() {
-    return {
-      url: { default: '' },
-      title: { default: '' }
-    };
-  },
-  parseHTML() {
-    return [{ tag: 'div[data-type="embed"]' }];
-  },
-  renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-type': 'embed' })];
-  },
-  addNodeView() {
-    return ReactNodeViewRenderer(EmbedView);
-  }
+  dataType: 'embed',
+  addAttributes: () => ({
+    url: { default: '' },
+    title: { default: '' }
+  }),
+  addNodeView: () => ReactNodeViewRenderer(EmbedView)
 });

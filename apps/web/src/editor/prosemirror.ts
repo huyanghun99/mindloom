@@ -4,6 +4,7 @@ export type PMNode = {
   type?: string;
   text?: string;
   attrs?: Record<string, unknown>;
+  marks?: { type: string; attrs?: Record<string, unknown> }[];
   content?: PMNode[];
 };
 
@@ -80,3 +81,80 @@ export function countWords(text: string): number {
 }
 
 export const emptyDoc: PMNode = { type: 'doc', content: [{ type: 'paragraph' }] };
+
+// ---- ProseMirror JSON -> HTML (read-only render for share / print) ----
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+type Mark = { type: string; attrs?: Record<string, unknown> };
+
+function renderInline(node: PMNode): string {
+  if (node.type === 'text') {
+    let text = escapeHtml(node.text ?? '');
+    const marks = (node.marks ?? []) as Mark[];
+    for (const m of marks) {
+      const href = m.attrs?.href ? escapeHtml(String(m.attrs.href)) : '';
+      const color = m.attrs?.color ? escapeHtml(String(m.attrs.color)) : '';
+      if (m.type === 'bold') text = `<strong>${text}</strong>`;
+      else if (m.type === 'italic') text = `<em>${text}</em>`;
+      else if (m.type === 'code') text = `<code>${text}</code>`;
+      else if (m.type === 'strike') text = `<s>${text}</s>`;
+      else if (m.type === 'underline') text = `<u>${text}</u>`;
+      else if (m.type === 'highlight') text = `<mark>${text}</mark>`;
+      else if (m.type === 'link') text = `<a href="${href}" target="_blank" rel="noreferrer">${text}</a>`;
+      else if (m.type === 'textStyle' && color) text = `<span style="color:${color}">${text}</span>`;
+    }
+    return text;
+  }
+  if (node.type === 'mathInline' && node.attrs) return `\\(${escapeHtml(String(node.attrs.latex ?? ''))}\\)`;
+  if (node.type === 'image' && node.attrs)
+    return `<img src="${escapeHtml(String(node.attrs.src ?? ''))}" alt="${escapeHtml(String(node.attrs.alt ?? ''))}" />`;
+  if (Array.isArray(node.content)) return node.content.map(renderInline).join('');
+  return '';
+}
+
+function renderContent(node: PMNode): string {
+  return (node.content ?? []).map(renderBlock).join('');
+}
+
+function renderBlock(node: PMNode): string {
+  const a = node.attrs ?? {};
+  switch (node.type) {
+    case 'paragraph': return `<p>${renderInline(node)}</p>`;
+    case 'heading': { const lvl = Math.min(6, Math.max(1, Number(a.level ?? 1))); return `<h${lvl}>${renderInline(node)}</h${lvl}>`; }
+    case 'codeBlock':
+      return `<pre><code${a.language ? ` class="language-${escapeHtml(String(a.language))}"` : ''}>${escapeHtml((node.content ?? []).map((n) => n.text ?? '').join(''))}</code></pre>`;
+    case 'blockquote': return `<blockquote>${renderContent(node)}</blockquote>`;
+    case 'bulletList': return `<ul>${renderContent(node)}</ul>`;
+    case 'orderedList': return `<ol>${renderContent(node)}</ol>`;
+    case 'taskList': return `<ul class="task-list">${renderContent(node)}</ul>`;
+    case 'listItem': return `<li>${renderContent(node)}</li>`;
+    case 'taskItem': return `<li class="task-item"><input type="checkbox" disabled ${a.checked ? 'checked' : ''}/> ${renderContent(node)}</li>`;
+    case 'horizontalRule': return '<hr/>';
+    case 'callout': return `<div class="callout callout-${escapeHtml(String(a.type ?? 'info'))}">${renderContent(node)}</div>`;
+    case 'toggle': return `<details><summary>${escapeHtml(String(a.summary ?? ''))}</summary>${renderContent(node)}</details>`;
+    case 'mathBlock': return `<div class="math-block">\\[${escapeHtml(String(a.latex ?? ''))}\\]</div>`;
+    case 'mermaid': return `<pre class="mermaid-block">${escapeHtml(String(a.code ?? ''))}</pre>`;
+    case 'drawio': return `<div class="embed-placeholder">[Draw.io 流程图]</div>`;
+    case 'excalidraw': return `<div class="embed-placeholder">[Excalidraw 白板]</div>`;
+    case 'embed': return `<a href="${escapeHtml(String(a.url ?? ''))}" target="_blank" rel="noreferrer">${escapeHtml(String(a.url ?? ''))}</a>`;
+    case 'image': return `<img src="${escapeHtml(String(a.src ?? ''))}" alt="${escapeHtml(String(a.alt ?? ''))}" />`;
+    case 'video': return `<video src="${escapeHtml(String(a.src ?? ''))}" controls />`;
+    case 'audio': return `<audio src="${escapeHtml(String(a.src ?? ''))}" controls />`;
+    case 'pdf': return `<a href="${escapeHtml(String(a.src ?? ''))}" target="_blank" rel="noreferrer">[PDF 文件]</a>`;
+    case 'file': return `<a href="${escapeHtml(String(a.src ?? ''))}" target="_blank" rel="noreferrer">${escapeHtml(String(a.fileName ?? '文件'))}</a>`;
+    case 'table': return `<table>${renderContent(node)}</table>`;
+    case 'tableRow': return `<tr>${renderContent(node)}</tr>`;
+    case 'tableHeader': return `<th>${renderContent(node)}</th>`;
+    case 'tableCell': return `<td>${renderContent(node)}</td>`;
+    default: return renderContent(node);
+  }
+}
+
+export function docToHtml(node: PMNode | null | undefined): string {
+  if (!node) return '';
+  if (node.type === 'doc') return renderContent(node);
+  return renderBlock(node);
+}

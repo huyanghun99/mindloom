@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { NodeViewWrapper, type NodeViewProps } from '@tiptap/react';
+import { type NodeViewProps } from '@tiptap/react';
+import { Pencil } from 'lucide-react';
+import { BlockFrame } from './BlockFrame';
 
 const EMPTY_XML =
   '<mxGraphModel dx="800" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="800" pageHeight="600" math="0" shadow="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel>';
@@ -7,7 +9,7 @@ const EMPTY_XML =
 const DRAWIO_URL =
   'https://embed.diagrams.net/?embed=1&ui=kennedy&proto=json&noSaveBtn=0&noExitBtn=0&saveAndExit=0&spin=1&libraries=1';
 
-function DrawioView({ node, updateAttributes, selected }: NodeViewProps) {
+export function DrawioView({ node, updateAttributes, selected, deleteNode }: NodeViewProps) {
   const xml = (node.attrs.xml as string) || '';
   const preview = (node.attrs.preview as string) || '';
   const [open, setOpen] = useState(false);
@@ -44,7 +46,6 @@ function DrawioView({ node, updateAttributes, selected }: NodeViewProps) {
         case 'save': {
           const newXml = msg.xml ?? (typeof msg.data === 'string' ? msg.data : '') ?? '';
           updateAttributes({ xml: newXml });
-          // Request an SVG export so we can render a preview inside the note.
           iframeRef.current?.contentWindow?.postMessage(
             JSON.stringify({ action: 'export', format: 'xmlsvg', xml: newXml }),
             '*'
@@ -64,24 +65,14 @@ function DrawioView({ node, updateAttributes, selected }: NodeViewProps) {
     return () => window.removeEventListener('message', handler);
   }, [open]);
 
+  const actions = (
+    <button type="button" className="ml-block-action" onMouseDown={(e) => { e.preventDefault(); setOpen(true); }}>
+      <Pencil size={13} /> 编辑图表
+    </button>
+  );
+
   return (
-    <NodeViewWrapper
-      className={`drawio-block${selected ? ' ProseMirror-selectednode' : ''}`}
-      data-drag-handle
-    >
-      <div className="drawio-bar" contentEditable={false}>
-        <span className="drawio-badge">Draw.io 流程图</span>
-        <button
-          type="button"
-          className="drawio-act"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            setOpen(true);
-          }}
-        >
-          编辑图表
-        </button>
-      </div>
+    <BlockFrame label="流程图（Draw.io）" kind="drawio" id={node.attrs.id} selected={selected} onDelete={() => deleteNode?.()} actions={actions}>
       {preview ? (
         <div className="drawio-preview" contentEditable={false} onDoubleClick={() => setOpen(true)}>
           <img src={preview} alt="diagram" />
@@ -95,9 +86,7 @@ function DrawioView({ node, updateAttributes, selected }: NodeViewProps) {
       {open && (
         <div
           className="modal-backdrop"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setOpen(false);
-          }}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setOpen(false); }}
         >
           <div className="modal drawio-modal">
             <div className="modal-head">
@@ -105,10 +94,7 @@ function DrawioView({ node, updateAttributes, selected }: NodeViewProps) {
               <button
                 type="button"
                 className="modal-close"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  setOpen(false);
-                }}
+                onMouseDown={(e) => { e.preventDefault(); setOpen(false); }}
               >
                 ×
               </button>
@@ -123,8 +109,6 @@ function DrawioView({ node, updateAttributes, selected }: NodeViewProps) {
           </div>
         </div>
       )}
-    </NodeViewWrapper>
+    </BlockFrame>
   );
 }
-
-export { DrawioView };

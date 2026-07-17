@@ -1,30 +1,30 @@
-import { NodeViewWrapper, type NodeViewProps } from '@tiptap/react';
-import { FileText, Film, Music, File as FileIcon, Download, Trash2 } from 'lucide-react';
+import { type NodeViewProps } from '@tiptap/react';
+import { Download } from 'lucide-react';
+import { BlockFrame } from './BlockFrame';
 
-function fmtSize(bytes?: number) {
-  if (bytes == null) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
+const KIND_LABEL: Record<string, string> = {
+  video: '视频', audio: '音频', pdf: 'PDF', file: '文件'
+};
 
-function MediaFrame({ icon, title, src, kind, onRemove, children }: {
-  icon: React.ReactNode; title: string; src: string; kind: string; onRemove: () => void; children?: React.ReactNode;
+function MediaFrame({ kind, title: _title, src, onRemove, children }: {
+  kind: string; title: string; src: string; onRemove: () => void; children: React.ReactNode;
 }) {
+  const actions = (
+    <a
+      className="ml-block-action"
+      href={src}
+      target="_blank"
+      rel="noopener noreferrer"
+      download
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <Download size={13} /> 下载
+    </a>
+  );
   return (
-    <NodeViewWrapper className={`media-block media-${kind}`} data-drag-handle>
-      <div className="media-toolbar" contentEditable={false}>
-        <span className="media-badge">{icon}</span>
-        <span className="media-name" title={title}>{title}</span>
-        <a className="media-act" href={src} target="_blank" rel="noopener noreferrer" onMouseDown={(e) => e.stopPropagation()}>
-          <Download size={13} /> 下载
-        </a>
-        <button type="button" className="media-act danger" onMouseDown={(e) => { e.preventDefault(); onRemove(); }}>
-          <Trash2 size={13} /> 删除
-        </button>
-      </div>
+    <BlockFrame label={KIND_LABEL[kind] ?? '文件'} kind={kind} onDelete={onRemove} actions={actions}>
       {children}
-    </NodeViewWrapper>
+    </BlockFrame>
   );
 }
 
@@ -32,7 +32,7 @@ export function VideoView({ node, deleteNode }: NodeViewProps) {
   const src = node.attrs.src as string;
   const fileName = (node.attrs.fileName as string) || '视频';
   return (
-    <MediaFrame icon={<Film size={14} />} title={fileName} src={src} kind="video" onRemove={() => deleteNode()}>
+    <MediaFrame kind="video" title={fileName} src={src} onRemove={() => deleteNode()}>
       <video className="media-video" src={src} controls preload="metadata" />
     </MediaFrame>
   );
@@ -42,7 +42,7 @@ export function AudioView({ node, deleteNode }: NodeViewProps) {
   const src = node.attrs.src as string;
   const fileName = (node.attrs.fileName as string) || '音频';
   return (
-    <MediaFrame icon={<Music size={14} />} title={fileName} src={src} kind="audio" onRemove={() => deleteNode()}>
+    <MediaFrame kind="audio" title={fileName} src={src} onRemove={() => deleteNode()}>
       <audio className="media-audio" src={src} controls preload="metadata" />
     </MediaFrame>
   );
@@ -53,10 +53,10 @@ export function PdfView({ node, deleteNode }: NodeViewProps) {
   const fileName = (node.attrs.fileName as string) || 'PDF';
   const size = node.attrs.size as number | undefined;
   return (
-    <MediaFrame icon={<FileText size={14} />} title={fileName} src={src} kind="pdf" onRemove={() => deleteNode()}>
+    <MediaFrame kind="pdf" title={fileName} src={src} onRemove={() => deleteNode()}>
       <div className="pdf-preview">
         <iframe className="pdf-frame" src={src} title={fileName} />
-        <span className="muted small">{fmtSize(size)}</span>
+        <span className="muted small">{size != null ? `${(size / 1024 / 1024).toFixed(1)} MB` : ''}</span>
       </div>
     </MediaFrame>
   );
@@ -68,11 +68,11 @@ export function FileCardView({ node, deleteNode }: NodeViewProps) {
   const size = node.attrs.size as number | undefined;
   const mime = (node.attrs.mimeType as string) || '';
   return (
-    <MediaFrame icon={<FileIcon size={14} />} title={fileName} src={src} kind="file" onRemove={() => deleteNode()}>
+    <MediaFrame kind="file" title={fileName} src={src} onRemove={() => deleteNode()}>
       <div className="file-card">
         <div className="file-meta">
           <span className="file-mime">{mime || '未知类型'}</span>
-          {size != null && <span className="muted small">{fmtSize(size)}</span>}
+          {size != null && <span className="muted small">{size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`}</span>}
         </div>
       </div>
     </MediaFrame>

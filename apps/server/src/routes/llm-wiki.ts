@@ -6,6 +6,7 @@ import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { db } from '../db/client';
 import { pages, wikiTopics, llmSuggestions, spaces } from '@mindloom/db';
 import { canEditSpace, canViewSpace, canEditPage } from '../services/permission.service';
+import { getSpacePolicy } from '../services/ai.service';
 import { enqueueJob } from '../services/job-runner';
 import { confirmEdgesForSuggestion } from '../services/graph.service';
 
@@ -27,6 +28,9 @@ llmWikiRoutes.post('/pages/:pageId/process-now', async (c) => {
   if (!(await canEditPage(user.id, pageId))) return c.json({ error: 'Forbidden' }, 403);
   const [page] = await db.select().from(pages).where(eq(pages.id, pageId)).limit(1);
   if (!page) return c.json({ error: 'Not found' }, 404);
+  if ((await getSpacePolicy(page.spaceId)) === 'disabled') {
+    return c.json({ error: 'AI is disabled for this space' }, 400);
+  }
   await db.update(pages).set({ llmProcessStatus: 'pending', llmDirtyReason: 'manual_trigger', updatedAt: sql`now()` }).where(eq(pages.id, pageId));
   await enqueueJob({ workspaceId: page.workspaceId, spaceId: page.spaceId, entityType: 'page', entityId: page.id, type: 'page.process_llm', runAfterSeconds: 0, priority: 10 });
   return c.json({ ok: true });
@@ -39,6 +43,9 @@ llmWikiRoutes.post('/spaces/:spaceId/reprocess', async (c) => {
   const user = c.get('user');
   const spaceId = c.req.param('spaceId');
   if (!(await canEditSpace(user.id, spaceId))) return c.json({ error: 'Forbidden' }, 403);
+  if ((await getSpacePolicy(spaceId)) === 'disabled') {
+    return c.json({ error: 'AI is disabled for this space' }, 400);
+  }
   const rows = await db.execute<any>(sql`
     SELECT id, workspace_id, space_id FROM pages WHERE space_id = ${spaceId} AND status = 'normal'
   `);

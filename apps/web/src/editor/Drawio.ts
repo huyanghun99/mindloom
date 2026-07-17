@@ -1,37 +1,22 @@
-import { Node, mergeAttributes, ReactNodeViewRenderer } from '@tiptap/react';
+import { ReactNodeViewRenderer } from '@tiptap/react';
 import { DrawioView } from './DrawioView';
+import { createMindloomBlock } from './blockContract';
 
-export const Drawio = Node.create({
+export const Drawio = createMindloomBlock({
   name: 'drawio',
-  group: 'block',
+  dataType: 'drawio',
   atom: true,
-  draggable: true,
-  selectable: true,
-
-  addAttributes() {
-    return {
-      xml: {
-        default: '',
-        parseHTML: (el) => el.getAttribute('data-xml') ?? '',
-        renderHTML: (attrs) => ({ 'data-xml': attrs.xml ?? '' })
-      },
-      preview: {
-        default: '',
-        parseHTML: (el) => el.getAttribute('data-preview') ?? '',
-        renderHTML: (attrs) => ({ 'data-preview': attrs.preview ?? '' })
-      }
-    };
-  },
-
-  parseHTML() {
-    return [{ tag: 'div[data-type="drawio"]' }];
-  },
-
-  renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-type': 'drawio' })];
-  },
-
-  addNodeView() {
-    return ReactNodeViewRenderer(DrawioView);
-  }
+  addAttributes: () => ({
+    xml: {
+      default: '',
+      parseHTML: (el: HTMLElement) => el.getAttribute('data-xml') ?? '',
+      renderHTML: (attrs: Record<string, unknown>) => ({ 'data-xml': attrs.xml ?? '' })
+    },
+    preview: {
+      default: '',
+      parseHTML: (el: HTMLElement) => el.getAttribute('data-preview') ?? '',
+      renderHTML: (attrs: Record<string, unknown>) => ({ 'data-preview': attrs.preview ?? '' })
+    }
+  }),
+  addNodeView: () => ReactNodeViewRenderer(DrawioView)
 });

@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { NodeViewWrapper, type NodeViewProps } from '@tiptap/react';
+import { type NodeViewProps } from '@tiptap/react';
 import mermaid from 'mermaid';
+import { Pencil } from 'lucide-react';
+import { BlockFrame } from './BlockFrame';
 
 mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose', fontFamily: 'inherit' });
 
 let idSeq = 0;
 
-export function MermaidView({ node, updateAttributes, selected }: NodeViewProps) {
+export function MermaidView({ node, updateAttributes, selected, deleteNode }: NodeViewProps) {
   const code = (node.attrs.code as string) || '';
   const [svg, setSvg] = useState('');
   const [error, setError] = useState('');
@@ -44,44 +46,27 @@ export function MermaidView({ node, updateAttributes, selected }: NodeViewProps)
     };
   }, [code]);
 
+  const actions = (
+    <button type="button" className="ml-block-action" onMouseDown={(e) => { e.preventDefault(); setDraft(code); setEditing((v) => !v); }}>
+      <Pencil size={13} /> {editing ? '完成' : '编辑'}
+    </button>
+  );
+
   return (
-    <NodeViewWrapper
-      className={`mermaid-block${selected ? ' ProseMirror-selectednode' : ''}`}
-      data-drag-handle
-    >
-      <div className="mermaid-toolbar" contentEditable={false}>
-        <span className="mermaid-badge">Mermaid</span>
-        <button
-          type="button"
-          className="mermaid-act"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            setDraft(code);
-            setEditing((v) => !v);
-          }}
-        >
-          {editing ? '完成' : '编辑'}
-        </button>
-      </div>
+    <BlockFrame label="流程图" kind="mermaid" id={node.attrs.id} selected={selected} onDelete={() => deleteNode?.()} actions={actions}>
       {editing ? (
         <textarea
           className="mermaid-editor"
           value={draft}
           spellCheck={false}
           onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => {
-            updateAttributes({ code: draft });
-            setEditing(false);
-          }}
+          onBlur={() => { updateAttributes({ code: draft }); setEditing(false); }}
         />
       ) : (
         <div
           className="mermaid-render"
           contentEditable={false}
-          onDoubleClick={() => {
-            setDraft(code);
-            setEditing(true);
-          }}
+          onDoubleClick={() => { setDraft(code); setEditing(true); }}
         >
           {error ? (
             <pre className="mermaid-error">{error}</pre>
@@ -92,6 +77,6 @@ export function MermaidView({ node, updateAttributes, selected }: NodeViewProps)
           )}
         </div>
       )}
-    </NodeViewWrapper>
+    </BlockFrame>
   );
 }

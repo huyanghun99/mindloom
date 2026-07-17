@@ -5,6 +5,7 @@ import { ragAskSchema } from '@mindloom/shared';
 import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { rateLimitMiddleware } from '../middleware/rate-limit';
 import { askRag } from '../services/rag.service';
+import { isAiDisabledError } from '../services/ai.service';
 import { db } from '../db/client';
 import { ragSessions } from '@mindloom/db';
 
@@ -13,7 +14,13 @@ ragRoutes.use('*', authMiddleware);
 ragRoutes.post('/ask', rateLimitMiddleware('rag.ask'), zValidator('json', ragAskSchema), async (c) => {
   const user = c.get('user');
   const input = c.req.valid('json');
-  const answer = await askRag({ userId: user.id, ...input });
+  let answer;
+  try {
+    answer = await askRag({ userId: user.id, ...input });
+  } catch (err) {
+    if (isAiDisabledError(err)) return c.json({ error: 'AI is disabled for this space' }, 403);
+    throw err;
+  }
   const [session] = await db.insert(ragSessions).values({
     workspaceId: input.workspaceId, spaceId: input.spaceId ?? null, userId: user.id,
     query: input.query, answer: answer.answer, citations: answer.citations
@@ -24,10 +31,16 @@ ragRoutes.post('/ask', rateLimitMiddleware('rag.ask'), zValidator('json', ragAsk
 ragRoutes.post('/ask/stream', rateLimitMiddleware('rag.ask.stream'), zValidator('json', ragAskSchema), async (c) => {
   const user = c.get('user');
   const input = c.req.valid('json');
+  let answer;
+  try {
+    answer = await askRag({ userId: user.id, ...input });
+  } catch (err) {
+    if (isAiDisabledError(err)) return c.json({ error: 'AI is disabled for this space' }, 403);
+    throw err;
+  }
   const stream = new ReadableStream({
     async start(controller) {
       const encoder = new TextEncoder();
-      const answer = await askRag({ userId: user.id, ...input });
       controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: answer.answer, done: false })}\n\n`));
       controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, citations: answer.citations })}\n\n`));
       controller.close();

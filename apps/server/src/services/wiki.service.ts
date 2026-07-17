@@ -1,6 +1,6 @@
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/client';
-import { pages, wikiTopics, topicSources, llmSuggestions } from '@mindloom/db';
+import { llmSuggestions } from '@mindloom/db';
 import type { AiProvider } from '@mindloom/ai';
 
 /**
@@ -165,13 +165,19 @@ async function hasPendingSuggestion(
   type: string,
   extra: { topicId?: string; targetPageId?: string }
 ): Promise<boolean> {
-  const conds: string[] = [`space_id = ${spaceId}`, `type = ${type}`, `status = 'pending'`];
-  if (extra.topicId) conds.push(`topic_id = ${extra.topicId}`);
-  if (extra.targetPageId) conds.push(`page_id = ${extra.targetPageId}`);
-  const rows = await db.execute<any>(sql`
-    SELECT 1 FROM llm_suggestions WHERE ${sql.raw(conds.join(' AND '))} LIMIT 1
-  `);
-  return rows.rows.length > 0;
+  const conditions = [
+    eq(llmSuggestions.spaceId, spaceId),
+    eq(llmSuggestions.type, type),
+    eq(llmSuggestions.status, 'pending')
+  ];
+  if (extra.topicId) conditions.push(eq(llmSuggestions.topicId, extra.topicId));
+  if (extra.targetPageId) conditions.push(eq(llmSuggestions.pageId, extra.targetPageId));
+  const rows = await db
+    .select({ one: sql`1` })
+    .from(llmSuggestions)
+    .where(and(...conditions))
+    .limit(1);
+  return rows.length > 0;
 }
 
 /* ----------------------------------------------------- main entry point ---- */

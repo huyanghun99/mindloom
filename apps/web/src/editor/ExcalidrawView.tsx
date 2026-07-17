@@ -1,5 +1,7 @@
 import { lazy, Suspense, useState } from 'react';
-import { NodeViewWrapper, type NodeViewProps } from '@tiptap/react';
+import { type NodeViewProps } from '@tiptap/react';
+import { Pencil, Check } from 'lucide-react';
+import { BlockFrame } from './BlockFrame';
 import { ExcalidrawErrorBoundary } from './ExcalidrawErrorBoundary';
 
 const ExcalidrawCanvas = lazy(() => import('./ExcalidrawCanvas'));
@@ -13,7 +15,7 @@ function blobToDataURL(blob: Blob): Promise<string> {
   });
 }
 
-export function ExcalidrawView({ node, updateAttributes, selected }: NodeViewProps) {
+function ExcalidrawView({ node, updateAttributes, selected, deleteNode }: NodeViewProps) {
   const elements = (node.attrs.elements as unknown[]) || [];
   const appState = (node.attrs.appState as object) || {};
   const files = (node.attrs.files as Record<string, unknown>) || {};
@@ -56,37 +58,18 @@ export function ExcalidrawView({ node, updateAttributes, selected }: NodeViewPro
     setEdit(false);
   };
 
+  const actions = edit ? (
+    <button type="button" className="ml-block-action primary" onMouseDown={(e) => { e.preventDefault(); commit(); }}>
+      <Check size={13} /> 完成
+    </button>
+  ) : (
+    <button type="button" className="ml-block-action" onMouseDown={(e) => { e.preventDefault(); startEdit(); }}>
+      <Pencil size={13} /> 编辑
+    </button>
+  );
+
   return (
-    <NodeViewWrapper
-      className={`excalidraw-block${selected ? ' ProseMirror-selectednode' : ''}`}
-      data-drag-handle
-    >
-      <div className="excalidraw-bar" contentEditable={false}>
-        <span className="excalidraw-badge">Excalidraw 白板</span>
-        {edit ? (
-          <button
-            type="button"
-            className="excalidraw-act primary"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              commit();
-            }}
-          >
-            完成
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="excalidraw-act"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              startEdit();
-            }}
-          >
-            编辑
-          </button>
-        )}
-      </div>
+    <BlockFrame label="白板（Excalidraw）" kind="excalidraw" id={node.attrs.id} selected={selected} onDelete={() => deleteNode?.()} actions={actions}>
       {edit ? (
         <div className="excalidraw-canvas">
           <ExcalidrawErrorBoundary onReset={startEdit}>
@@ -109,6 +92,8 @@ export function ExcalidrawView({ node, updateAttributes, selected }: NodeViewPro
           点击「编辑」打开 Excalidraw 白板自由绘制
         </div>
       )}
-    </NodeViewWrapper>
+    </BlockFrame>
   );
 }
+
+export { ExcalidrawView };

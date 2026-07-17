@@ -25,7 +25,9 @@ export const createSpaceSchema = z.object({
 });
 
 export const createPageSchema = z.object({
-  workspaceId: z.string().uuid(),
+  // workspaceId is intentionally NOT accepted from the client. The backend
+  // resolves the real workspaceId from the provided spaceId to prevent
+  // cross-workspace pollution (see AGENTS.md data-correctness rules).
   spaceId: z.string().uuid(),
   parentPageId: z.string().uuid().nullable().optional(),
   title: z.string().min(1).max(300),

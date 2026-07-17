@@ -1,5 +1,5 @@
 import { Citation, RagAnswer } from '@mindloom/shared';
-import { createAiProvider } from './ai.service';
+import { createAiProviderForContext } from './ai.service';
 import { hybridSearch } from './search.service';
 
 export async function askRag(params: {
@@ -16,7 +16,13 @@ export async function askRag(params: {
   }
 
   const context = results.map((r, i) => `[${i + 1}] ${r.title}\n${r.content}`).join('\n\n');
-  const ai = createAiProvider();
+  // Every RAG call goes through the context-aware provider so the Space AI
+  // policy (local_only / disabled) is always honoured.
+  const ai = await createAiProviderForContext({
+    workspaceId: params.workspaceId,
+    spaceId: params.spaceId,
+    userId: params.userId
+  });
   const answer = await ai.generateText([
     { role: 'system', content: 'You answer strictly from the provided knowledge base context. Cite sources using [1], [2]. If context is insufficient, say so clearly.' },
     { role: 'user', content: `Context:\n${context}\n\nQuestion:\n${params.query}` }

@@ -1,5 +1,7 @@
 import { useState } from 'react';
-import { Node, mergeAttributes, NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from '@tiptap/react';
+import { ReactNodeViewRenderer, NodeViewContent, type NodeViewProps } from '@tiptap/react';
+import { createMindloomBlock } from './blockContract';
+import { BlockFrame } from './BlockFrame';
 
 const EMOJIS = ['💡', '📌', '⚠️', '✅', '❓', '🔥', '📚', '🧠', '🛠️', '📝'];
 const COLORS = [
@@ -10,62 +12,54 @@ const COLORS = [
   { key: 'purple', label: '紫', bg: '#f4ecff', border: '#d9c2ff' }
 ];
 
-function CalloutView({ node, updateAttributes }: NodeViewProps) {
+function CalloutView({ node, updateAttributes, selected, deleteNode }: NodeViewProps) {
   const emoji = (node.attrs.emoji as string) || '💡';
   const color = (node.attrs.color as string) || 'blue';
   const palette = COLORS.find((c) => c.key === color) ?? COLORS[0];
   const [showEmoji, setShowEmoji] = useState(false);
   const [showColor, setShowColor] = useState(false);
+
+  const actions = (
+    <>
+      <button type="button" className="ml-block-action" onMouseDown={(e) => { e.preventDefault(); setShowEmoji((v) => !v); setShowColor(false); }}>
+        {emoji}
+      </button>
+      {showEmoji && (
+        <div className="ml-pop">
+          {EMOJIS.map((em) => (
+            <button key={em} type="button" onMouseDown={(e) => { e.preventDefault(); updateAttributes({ emoji: em }); setShowEmoji(false); }}>{em}</button>
+          ))}
+        </div>
+      )}
+      <button type="button" className="ml-block-action" style={{ background: palette.border }} title="配色"
+        onMouseDown={(e) => { e.preventDefault(); setShowColor((v) => !v); setShowEmoji(false); }} />
+      {showColor && (
+        <div className="ml-pop">
+          {COLORS.map((c) => (
+            <button key={c.key} type="button" className="ml-swatch" style={{ background: c.bg, borderColor: c.border }}
+              onMouseDown={(e) => { e.preventDefault(); updateAttributes({ color: c.key }); setShowColor(false); }} title={c.label} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+
   return (
-    <NodeViewWrapper className="callout-block" data-color={color}
-      style={{ background: palette.bg, borderColor: palette.border }}>
-      <div className="callout-bar" contentEditable={false}>
-        <button type="button" className="callout-emoji" onMouseDown={(e) => { e.preventDefault(); setShowEmoji((v) => !v); setShowColor(false); }}>
-          {emoji}
-        </button>
-        {showEmoji && (
-          <div className="callout-pop">
-            {EMOJIS.map((em) => (
-              <button key={em} type="button" onMouseDown={(e) => { e.preventDefault(); updateAttributes({ emoji: em }); setShowEmoji(false); }}>{em}</button>
-            ))}
-          </div>
-        )}
-        <button type="button" className="callout-color" style={{ background: palette.border }} title="配色"
-          onMouseDown={(e) => { e.preventDefault(); setShowColor((v) => !v); setShowEmoji(false); }} />
-        {showColor && (
-          <div className="callout-pop">
-            {COLORS.map((c) => (
-              <button key={c.key} type="button" className="callout-swatch" style={{ background: c.bg, borderColor: c.border }}
-                onMouseDown={(e) => { e.preventDefault(); updateAttributes({ color: c.key }); setShowColor(false); }} title={c.label} />
-            ))}
-          </div>
-        )}
-      </div>
-      <div className="callout-content">
+    <BlockFrame label="标注" kind="callout" id={node.attrs.id} selected={selected} onDelete={() => deleteNode?.()} actions={actions}>
+      <div className="callout-content" style={{ background: palette.bg, borderColor: palette.border }}>
         <NodeViewContent className="callout-editable" />
       </div>
-    </NodeViewWrapper>
+    </BlockFrame>
   );
 }
 
-export const Callout = Node.create({
+export const Callout = createMindloomBlock({
   name: 'callout',
-  group: 'block',
+  dataType: 'callout',
   content: 'block+',
-  defining: true,
-  addAttributes() {
-    return {
-      emoji: { default: '💡' },
-      color: { default: 'blue' }
-    };
-  },
-  parseHTML() {
-    return [{ tag: 'div[data-type="callout"]' }];
-  },
-  renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-type': 'callout' })];
-  },
-  addNodeView() {
-    return ReactNodeViewRenderer(CalloutView);
-  }
+  addAttributes: () => ({
+    emoji: { default: '💡' },
+    color: { default: 'blue' }
+  }),
+  addNodeView: () => ReactNodeViewRenderer(CalloutView)
 });

@@ -7,6 +7,8 @@ export interface AiProvider {
   generateText(messages: AiMessage[]): Promise<string>;
   streamText(messages: AiMessage[]): AsyncGenerator<string>;
   embed(text: string): Promise<number[]>;
+  /** Batch embedding. Default implementation falls back to per-item `embed`. */
+  embedBatch(texts: string[]): Promise<number[][]>;
 }
 
 export const DEFAULT_EMBEDDING_DIMENSION = 1536;
@@ -48,6 +50,10 @@ export class MockAiProvider implements AiProvider {
 
   async embed(text: string): Promise<number[]> {
     return deterministicVector(text, this.dimension);
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    return texts.map((t) => deterministicVector(t, this.dimension));
   }
 }
 
@@ -143,6 +149,30 @@ export class OpenAICompatibleProvider implements AiProvider {
       throw new Error('向量化响应缺少 embedding 向量');
     }
     return normalizeVector(vec, this.opts.embeddingDimension);
+  }
+
+  async embedBatch(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const res = await fetch(`${this.opts.embeddingBaseUrl.replace(/\/$/, '')}/embeddings`, {
+      method: 'POST',
+      headers: this.headers(this.opts.embeddingApiKey),
+      body: JSON.stringify({
+        model: this.opts.embeddingModel,
+        input: texts,
+        dimensions: this.opts.embeddingDimension,
+        encoding_format: 'float'
+      })
+    });
+    if (!res.ok) {
+      throw new Error(`批量向量化请求失败 (${res.status}): ${await res.text().catch(() => res.statusText)}`);
+    }
+    const data = await res.json();
+    const list = data?.data as { embedding?: number[] }[] | undefined;
+    if (!Array.isArray(list) || list.length === 0) {
+      throw new Error('批量向量化响应缺少 embedding 向量');
+    }
+    // Preserve input order; the API returns embeddings in the same order.
+    return list.map((d) => normalizeVector(d.embedding ?? [], this.opts.embeddingDimension));
   }
 }
 

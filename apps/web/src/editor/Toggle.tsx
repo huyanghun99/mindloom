@@ -1,16 +1,22 @@
 import { useState } from 'react';
-import { Node, mergeAttributes, NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from '@tiptap/react';
+import { ReactNodeViewRenderer, NodeViewContent, type NodeViewProps } from '@tiptap/react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { createMindloomBlock } from './blockContract';
+import { BlockFrame } from './BlockFrame';
 
-function ToggleView({ node, updateAttributes }: NodeViewProps) {
+function ToggleView({ node, updateAttributes, selected, deleteNode }: NodeViewProps) {
   const [open, setOpen] = useState(true);
   const summary = (node.attrs.summary as string) || '';
+
+  const actions = (
+    <button type="button" className="ml-block-action" onMouseDown={(e) => { e.preventDefault(); setOpen((v) => !v); }}>
+      {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} {open ? '收起' : '展开'}
+    </button>
+  );
+
   return (
-    <NodeViewWrapper className="toggle-block">
-      <div className="toggle-head" contentEditable={false}>
-        <button type="button" className="toggle-chevron" onMouseDown={(e) => { e.preventDefault(); setOpen((v) => !v); }}>
-          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </button>
+    <BlockFrame label="折叠" kind="toggle" id={node.attrs.id} selected={selected} onDelete={() => deleteNode?.()} actions={actions}>
+      <div className="toggle-content">
         <input
           className="toggle-summary"
           value={summary}
@@ -18,31 +24,16 @@ function ToggleView({ node, updateAttributes }: NodeViewProps) {
           onMouseDown={(e) => e.stopPropagation()}
           onChange={(e) => updateAttributes({ summary: e.target.value })}
         />
+        {open && <NodeViewContent className="toggle-editable" />}
       </div>
-      {open && (
-        <div className="toggle-content">
-          <NodeViewContent className="toggle-editable" />
-        </div>
-      )}
-    </NodeViewWrapper>
+    </BlockFrame>
   );
 }
 
-export const Toggle = Node.create({
+export const Toggle = createMindloomBlock({
   name: 'toggle',
-  group: 'block',
+  dataType: 'toggle',
   content: 'block+',
-  defining: true,
-  addAttributes() {
-    return { summary: { default: '' } };
-  },
-  parseHTML() {
-    return [{ tag: 'div[data-type="toggle"]' }];
-  },
-  renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-type': 'toggle' })];
-  },
-  addNodeView() {
-    return ReactNodeViewRenderer(ToggleView);
-  }
+  addAttributes: () => ({ summary: { default: '' } }),
+  addNodeView: () => ReactNodeViewRenderer(ToggleView)
 });

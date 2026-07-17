@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { Node, mergeAttributes, NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from '@tiptap/react';
 import katex from 'katex';
+import { Pencil } from 'lucide-react';
+import { createMindloomBlock } from './blockContract';
+import { BlockFrame } from './BlockFrame';
 
 function renderLatex(latex: string, display: boolean): string {
   try {
@@ -10,17 +13,20 @@ function renderLatex(latex: string, display: boolean): string {
   }
 }
 
-function MathBlockView({ node, updateAttributes }: NodeViewProps) {
+function MathBlockView({ node, updateAttributes, selected, deleteNode }: NodeViewProps) {
   const latex = (node.attrs.latex as string) || '';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(latex);
   const html = renderLatex(latex, true);
+
+  const actions = (
+    <button type="button" className="ml-block-action" onMouseDown={(e) => { e.preventDefault(); setDraft(latex); setEditing((v) => !v); }}>
+      <Pencil size={13} /> {editing ? '完成' : '编辑'}
+    </button>
+  );
+
   return (
-    <NodeViewWrapper className="math-block" data-drag-handle>
-      <div className="math-toolbar" contentEditable={false}>
-        <span className="math-badge">公式</span>
-        <button type="button" className="math-act" onMouseDown={(e) => { e.preventDefault(); setDraft(latex); setEditing((v) => !v); }}>{editing ? '完成' : '编辑'}</button>
-      </div>
+    <BlockFrame label="公式" kind="mathBlock" id={node.attrs.id} selected={selected} onDelete={() => deleteNode?.()} actions={actions}>
       {editing ? (
         <textarea className="math-editor" value={draft} spellCheck={false}
           placeholder="E = mc^2"
@@ -31,17 +37,43 @@ function MathBlockView({ node, updateAttributes }: NodeViewProps) {
           onDoubleClick={() => { setDraft(latex); setEditing(true); }}
           dangerouslySetInnerHTML={{ __html: html }} />
       )}
-    </NodeViewWrapper>
+    </BlockFrame>
   );
 }
 
-function MathInlineView({ node, updateAttributes }: NodeViewProps) {
+export const MathBlock = createMindloomBlock({
+  name: 'mathBlock',
+  dataType: 'mathBlock',
+  atom: true,
+  addAttributes: () => ({ latex: { default: 'E = mc^2' } }),
+  addNodeView: () => ReactNodeViewRenderer(MathBlockView)
+});
+
+export const MathInline = Node.create({
+  name: 'mathInline',
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: true,
+  addAttributes: () => ({ latex: { default: '' } }),
+  parseHTML() {
+    return [{ tag: 'span[data-type="mathInline"]' }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ['span', mergeAttributes(HTMLAttributes, { 'data-type': 'mathInline' })];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(MathInlineView);
+  }
+});
+
+function MathInlineView({ node, updateAttributes, selected }: NodeViewProps) {
   const latex = (node.attrs.latex as string) || '';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(latex);
   const html = renderLatex(latex, false);
   return (
-    <NodeViewWrapper className="math-inline" as="span" data-drag-handle>
+    <NodeViewWrapper className={`math-inline${selected ? ' ProseMirror-selectednode' : ''}`} as="span" data-drag-handle>
       {editing ? (
         <input className="math-inline-editor" value={draft} spellCheck={false}
           onBlur={() => { updateAttributes({ latex: draft }); setEditing(false); }}
@@ -53,43 +85,3 @@ function MathInlineView({ node, updateAttributes }: NodeViewProps) {
     </NodeViewWrapper>
   );
 }
-
-export const MathBlock = Node.create({
-  name: 'mathBlock',
-  group: 'block',
-  atom: true,
-  draggable: true,
-  selectable: true,
-  addAttributes() {
-    return { latex: { default: 'E = mc^2' } };
-  },
-  parseHTML() {
-    return [{ tag: 'div[data-type="mathBlock"]' }];
-  },
-  renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-type': 'mathBlock' })];
-  },
-  addNodeView() {
-    return ReactNodeViewRenderer(MathBlockView);
-  }
-});
-
-export const MathInline = Node.create({
-  name: 'mathInline',
-  group: 'inline',
-  inline: true,
-  atom: true,
-  selectable: true,
-  addAttributes() {
-    return { latex: { default: '' } };
-  },
-  parseHTML() {
-    return [{ tag: 'span[data-type="mathInline"]' }];
-  },
-  renderHTML({ HTMLAttributes }) {
-    return ['span', mergeAttributes(HTMLAttributes, { 'data-type': 'mathInline' })];
-  },
-  addNodeView() {
-    return ReactNodeViewRenderer(MathInlineView);
-  }
-});

@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { HybridSearchResult, RRF_K } from '@mindloom/shared';
 import { db } from '../db/client';
-import { createAiProvider, vectorToSqlLiteral } from './ai.service';
+import { createAiProviderForContext, isAiDisabledError, vectorToSqlLiteral, type AiProvider } from './ai.service';
 import { getReadableSpaceIds } from './permission.service';
 import { tokenizeChineseFriendly } from '../utils/text';
 
@@ -13,6 +13,32 @@ interface RankedRow {
   content: string;
   score: number;
   [key: string]: unknown;
+}
+
+/**
+ * Query-embedding cache (Phase 2 perf).
+ *
+ * The semantic branch needs a vector for the *user's query string*. Without
+ * caching, every debounced keystroke that lands on a cache miss would call
+ * the remote embedding endpoint. We memoise per normalised query so repeated
+ * searches (and the brief re-fires that slip past the client debounce) reuse
+ * the vector instead of hitting the network. Bounded LRU by insertion order.
+ */
+const QUERY_EMBEDDING_CACHE = new Map<string, number[]>();
+const QUERY_CACHE_MAX = 512;
+
+async function embedQuery(ai: AiProvider, query: string): Promise<number[] | null> {
+  const key = query.trim().toLowerCase();
+  if (!key) return null;
+  const hit = QUERY_EMBEDDING_CACHE.get(key);
+  if (hit) return hit;
+  const emb = await ai.embed(query);
+  if (QUERY_EMBEDDING_CACHE.size >= QUERY_CACHE_MAX) {
+    const oldest = QUERY_EMBEDDING_CACHE.keys().next().value;
+    if (oldest !== undefined) QUERY_EMBEDDING_CACHE.delete(oldest);
+  }
+  QUERY_EMBEDDING_CACHE.set(key, emb);
+  return emb;
 }
 
 function rrfFuse(bm25: RankedRow[], vector: RankedRow[], limit: number): HybridSearchResult[] {
@@ -89,19 +115,31 @@ export async function hybridSearch(params: {
 
   const vectorPromise: Promise<{ rows: RankedRow[] }> = useVector
     ? (async () => {
-        const ai = createAiProvider();
-        const embedding = await ai.embed(params.query);
-        const vectorLiteral = vectorToSqlLiteral(embedding);
-        return db.execute<RankedRow>(sql`
-          SELECT id, page_id, space_id, title, content,
-                 1 - (embedding <=> ${vectorLiteral}::vector) AS score
-          FROM document_chunks
-          WHERE workspace_id = ${params.workspaceId}
-            AND space_id = ANY(ARRAY[${sql.join(readable.map((id) => sql`${id}::uuid`), sql`, `)}])
-            AND embedding IS NOT NULL
-          ORDER BY embedding <=> ${vectorLiteral}::vector
-          LIMIT ${params.limit * 3}
-        `);
+        // A disabled space must not run Embedding. Skip vector search
+        // (keyword/BM25 still works) and return no vector rows.
+        try {
+          const ai = await createAiProviderForContext({
+            workspaceId: params.workspaceId,
+            spaceId: params.spaceId,
+            userId: params.userId
+          });
+          const embedding = await embedQuery(ai, params.query);
+          if (!embedding) return { rows: [] };
+          const vectorLiteral = vectorToSqlLiteral(embedding);
+          return db.execute<RankedRow>(sql`
+            SELECT id, page_id, space_id, title, content,
+                   1 - (embedding <=> ${vectorLiteral}::vector) AS score
+            FROM document_chunks
+            WHERE workspace_id = ${params.workspaceId}
+              AND space_id = ANY(ARRAY[${sql.join(readable.map((id) => sql`${id}::uuid`), sql`, `)}])
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> ${vectorLiteral}::vector
+            LIMIT ${params.limit * 3}
+          `);
+        } catch (err) {
+          if (isAiDisabledError(err)) return { rows: [] };
+          throw err;
+        }
       })()
     : Promise.resolve({ rows: [] });
 

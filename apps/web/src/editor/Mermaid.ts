@@ -1,32 +1,16 @@
-import { Node, mergeAttributes, ReactNodeViewRenderer } from '@tiptap/react';
+import { ReactNodeViewRenderer } from '@tiptap/react';
 import { MermaidView } from './MermaidView';
+import { createMindloomBlock } from './blockContract';
 
-export const Mermaid = Node.create({
+export const Mermaid = createMindloomBlock({
   name: 'mermaid',
-  group: 'block',
-  atom: true,
-  draggable: true,
-  selectable: true,
-
-  addAttributes() {
-    return {
-      code: {
-        default: 'graph TD\n  A[开始] --> B[结束]',
-        parseHTML: (el) => el.getAttribute('data-code') ?? el.textContent ?? '',
-        renderHTML: (attrs) => ({ 'data-code': attrs.code })
-      }
-    };
-  },
-
-  parseHTML() {
-    return [{ tag: 'div[data-type="mermaid"]' }];
-  },
-
-  renderHTML({ HTMLAttributes }) {
-    return ['div', mergeAttributes(HTMLAttributes, { 'data-type': 'mermaid' })];
-  },
-
-  addNodeView() {
-    return ReactNodeViewRenderer(MermaidView);
-  }
+  dataType: 'mermaid',
+  addAttributes: () => ({
+    code: {
+      default: 'graph TD\n  A[开始] --> B[结束]',
+      parseHTML: (el: HTMLElement) => el.getAttribute('data-code') ?? el.textContent ?? '',
+      renderHTML: (attrs: Record<string, unknown>) => ({ 'data-code': attrs.code })
+    }
+  }),
+  addNodeView: () => ReactNodeViewRenderer(MermaidView)
 });
