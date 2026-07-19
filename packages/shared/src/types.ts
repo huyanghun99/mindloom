@@ -44,3 +44,24 @@ export interface KnowledgeEdgeEvidence {
   promptVersion?: string;
   confidence?: number;
 }
+
+/**
+ * Server-Sent-Events emitted by the streaming RAG endpoint
+ * (`POST /api/rag/ask/stream`). The client renders `sources` first
+ * (so the user sees where the answer comes from), then the answer
+ * tokens arrive progressively, with `citation` events surfacing a
+ * referenced source the moment it is first cited.
+ */
+export type StreamRagEvent =
+  | { type: 'sources'; citations: Citation[] }
+  | { type: 'token'; text: string }
+  | { type: 'citation'; index: number; citation: Citation }
+  | { type: 'done'; answer: string; sessionId?: string }
+  | { type: 'error'; message: string };
+
+/** Per-page AI profile powering the right-panel summary / tags. */
+export interface AiProfile {
+  summary: string;
+  tags: string[];
+  keywords: string[];
+}

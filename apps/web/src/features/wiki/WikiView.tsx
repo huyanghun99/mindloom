@@ -1,19 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Brain, Check, Layers, Link2, Network, Pause, Play, Plus, RefreshCw, X, Zap } from 'lucide-react';
+import { Brain, Check, Layers, Link2, Network, Pause, Play, Plus, RefreshCw, RotateCcw, X, Zap } from 'lucide-react';
 import { api, post } from '../../api';
 import { useAdaptivePolling } from '../../hooks/useAdaptivePolling';
 import { EmptyState } from '../../components/EmptyState';
-import type { Space } from '../../types';
+import type { Space, WikiSuggestion } from '../../types';
 
 type WikiTopic = {
   id: string; title: string; status: string; source: string;
   aiSummary: string; textContent?: string; createdAt?: string;
-};
-type WikiSuggestion = {
-  id: string; type: string; risk: string; status: string;
-  payload: Record<string, unknown>; evidence: Record<string, unknown>;
-  pageId?: string | null; topicId?: string | null; createdAt?: string;
 };
 
 const SUGGESTION_TYPE_LABEL: Record<string, string> = {
@@ -100,18 +95,39 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
       else n.add(id);
       return n;
     });
+  const bulkAccept = useMutation({
+    mutationFn: (ids: string[]) => post(`/api/llm-wiki/suggestions/bulk-accept`, { spaceId: space.id, ids }),
+    onSuccess: () => { setSelected(new Set()); qc.invalidateQueries({ queryKey: ['suggestions', space.id] }); }
+  });
+  const [recentlyAccepted, setRecentlyAccepted] = useState<{ id: string; label: string }[]>([]);
+
   const accept = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/accept`, {}),
-    onSuccess: () => { setSelected(new Set()); qc.invalidateQueries({ queryKey: ['suggestions', space.id] }); }
+    onSuccess: (_r, id) => {
+      setSelected(new Set());
+      qc.invalidateQueries({ queryKey: ['suggestions', space.id] });
+      const s = suggestions.find((x) => x.id === id);
+      if (s) setRecentlyAccepted((p) => [...p, { id, label: SUGGESTION_TYPE_LABEL[s.type] ?? s.type }]);
+    }
   });
   const ignore = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/ignore`, {}),
     onSuccess: () => { setSelected(new Set()); qc.invalidateQueries({ queryKey: ['suggestions', space.id] }); }
   });
-  const bulkAccept = useMutation({
-    mutationFn: (ids: string[]) => post(`/api/llm-wiki/suggestions/bulk-accept`, { spaceId: space.id, ids }),
-    onSuccess: () => { setSelected(new Set()); qc.invalidateQueries({ queryKey: ['suggestions', space.id] }); }
+  const undo = useMutation({
+    mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/undo`, {}),
+    onSuccess: (_r, id) => {
+      setRecentlyAccepted((p) => p.filter((x) => x.id !== id));
+      qc.invalidateQueries({ queryKey: ['suggestions', space.id] });
+    }
   });
+
+  // Review Center: batch-accept every *low-risk* pending suggestion in one shot.
+  const lowRiskIds = suggestions.filter((s) => s.risk === 'low').map((s) => s.id);
+  const bulkAcceptLow = () => {
+    if (lowRiskIds.length === 0) return;
+    bulkAccept.mutate(lowRiskIds);
+  };
 
   const [activeTopic, setActiveTopic] = useState<WikiTopic | null>(null);
   const { data: topicSources } = useQuery<{ sources: { id: string; title: string }[] }>({
@@ -128,6 +144,13 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
   const refreshTopic = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/topics/${id}/refresh-suggestions`, {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['suggestions', space.id] })
+  });
+  const undoTopicM = useMutation({
+    mutationFn: (id: string) => post(`/api/llm-wiki/topics/${id}/undo`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['topics', space.id] });
+      if (activeTopic) setActiveTopic({ ...activeTopic, status: 'suggested' });
+    }
   });
   const [newTitle, setNewTitle] = useState('');
   const createTopic = useMutation({
@@ -193,6 +216,9 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
             </label>
             <span className="muted small">已选 {selected.size} / {suggestions.length}</span>
             <div className="spacer" />
+            <button className="ghost sm" disabled={lowRiskIds.length === 0 || bulkAccept.isPending} onClick={bulkAcceptLow} title="一次性接受所有低风险建议">
+              <Check size={14} /> 批量接受低风险（{lowRiskIds.length}）
+            </button>
             <button className="primary sm" disabled={selected.size === 0 || bulkAccept.isPending} onClick={() => bulkAccept.mutate([...selected])}>
               <Check size={14} /> 批量接受
             </button>
@@ -200,6 +226,7 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
           {suggestions.length === 0 && <EmptyState icon={<Brain size={36} />} title="暂无待审阅建议" hint="处理笔记后会由 AI 生成主题提案与关联建议。" />}
           {suggestions.map((s) => {
             const sum = suggestionSummary(s);
+            const p = s.payload as { topicTitle?: string; targetPageTitle?: string; changes?: string; reason?: string; evidence?: Record<string, unknown> };
             const checked = selected.has(s.id);
             return (
               <div className={`wiki-row sugg${checked ? ' checked' : ''}`} key={s.id}>
@@ -210,6 +237,9 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
                     <span className={`risk risk-${s.risk}`}>{RISK_LABEL[s.risk] ?? s.risk}</span>
                     <b>{sum.title}</b>
                   </div>
+                  {p.changes && <p className="sugg-changes">将改变：{p.changes}</p>}
+                  {p.reason && <p className="muted small">原因：{p.reason}</p>}
+                  {s.type === 'stale_topic' && <p className="tag stale-badge">内容可能已过时</p>}
                   <p className="muted small">{sum.desc}</p>
                 </div>
                 <div className="wiki-row-actions">
@@ -225,6 +255,18 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
               </div>
             );
           })}
+          {recentlyAccepted.map((a) => (
+            <div className="wiki-row sugg accepted" key={a.id}>
+              <div className="wiki-row-main">
+                <span className="tag ok-badge">已接受</span>
+                <b>{a.label}</b>
+                <p className="muted small">所有 AI 修改均可撤销。</p>
+              </div>
+              <div className="wiki-row-actions">
+                <button className="ghost" disabled={undo.isPending} onClick={() => undo.mutate(a.id)}><RotateCcw size={14} /> 撤销</button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -256,6 +298,12 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
                 <div className="topic-detail-actions">
                   {activeTopic.status !== 'accepted' && (
                     <button className="primary sm" disabled={acceptTopic.isPending} onClick={() => acceptTopic.mutate(activeTopic.id)}><Check size={14} /> 采纳主题</button>
+                  )}
+                  {activeTopic.status === 'accepted' && (
+                    <button className="ghost" disabled={undoTopicM.isPending} onClick={() => undoTopicM.mutate(activeTopic.id)}><RotateCcw size={14} /> 撤销采纳</button>
+                  )}
+                  {activeTopic.status === 'stale' && (
+                    <span className="tag stale-badge">内容可能已过时</span>
                   )}
                   <button className="ghost" disabled={refreshTopic.isPending} onClick={() => refreshTopic.mutate(activeTopic.id)}><RefreshCw size={14} /> 刷新建议</button>
                 </div>

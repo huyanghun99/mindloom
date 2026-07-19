@@ -15,6 +15,7 @@ import { useFavorites } from '../../hooks/useFavorites';
 import { useEditorStatus, type SaveState } from '../shell/editorStatus';
 import { useDeletePage } from './useDeletePage';
 import { loadDraft, saveDraft, clearDraft, draftEquals, type LocalDraft } from '../../editor/draft';
+import { consumePendingScroll, scrollEditorToText } from '../../editor/scrollTo';
 import { ConflictModal } from './ConflictModal';
 import type { PageDetail, Space, TreeNode, Workspace } from '../../types';
 
@@ -105,6 +106,21 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
     }, 800);
     return () => window.clearTimeout(t);
   }, [dirty, title, doc, page?.id]);
+
+  // When a citation click requests a scroll to a specific chunk, jump to it
+  // once the editor content is mounted. Retries briefly while the doc loads.
+  const scrolledRef = useRef<number>(-1);
+  useEffect(() => {
+    const text = consumePendingScroll();
+    if (!text || scrolledRef.current === ek) return;
+    scrolledRef.current = ek;
+    const tryScroll = (attempt: number) => {
+      const root = document.querySelector('.editor-content') as HTMLElement | null;
+      if (scrollEditorToText(root, text)) return;
+      if (attempt < 5) window.setTimeout(() => tryScroll(attempt + 1), 300);
+    };
+    tryScroll(0);
+  }, [ek]);
 
   const patchTreeNode = useCallback((p: PageDetail) => {
     qc.setQueryData<{ tree: TreeNode[] }>(['page-tree', space.id], (old) => {

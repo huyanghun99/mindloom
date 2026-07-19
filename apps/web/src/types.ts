@@ -43,3 +43,16 @@ export type RagSession = {
   createdAt?: string;
   citations?: { title?: string; pageId?: string }[];
 };
+
+// AI suggestion surfaced in the Review Center and the right-panel "主题建议".
+export type WikiSuggestion = {
+  id: string;
+  type: string;
+  risk: string;
+  status: string;
+  payload: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  pageId?: string | null;
+  topicId?: string | null;
+  createdAt?: string;
+};

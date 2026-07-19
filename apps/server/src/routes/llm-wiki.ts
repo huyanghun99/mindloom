@@ -9,6 +9,7 @@ import { canEditSpace, canViewSpace, canEditPage } from '../services/permission.
 import { getSpacePolicy } from '../services/ai.service';
 import { enqueueJob } from '../services/job-runner';
 import { confirmEdgesForSuggestion } from '../services/graph.service';
+import { undoSuggestion } from '../services/wiki.service';
 
 export const llmWikiRoutes = new Hono<AppEnv>();
 llmWikiRoutes.use('*', authMiddleware);
@@ -128,6 +129,16 @@ llmWikiRoutes.post('/topics/:topicId/accept', async (c) => {
   return c.json({ topic: updated });
 });
 
+// Revert an accepted topic back to `suggested` (undo of the accept action).
+llmWikiRoutes.post('/topics/:topicId/undo', async (c) => {
+  const user = c.get('user');
+  const [topic] = await db.select().from(wikiTopics).where(eq(wikiTopics.id, c.req.param('topicId'))).limit(1);
+  if (!topic) return c.json({ error: 'Not found' }, 404);
+  if (!(await canEditSpace(user.id, topic.spaceId))) return c.json({ error: 'Forbidden' }, 403);
+  const [updated] = await db.update(wikiTopics).set({ status: 'suggested', updatedAt: sql`now()` }).where(eq(wikiTopics.id, c.req.param('topicId'))).returning();
+  return c.json({ topic: updated });
+});
+
 // Spec §22.4: trigger refresh suggestions for a (stale) topic.
 llmWikiRoutes.post('/topics/:topicId/refresh-suggestions', async (c) => {
   const user = c.get('user');
@@ -165,7 +176,11 @@ llmWikiRoutes.get('/suggestions', async (c) => {
   const spaceId = c.req.query('spaceId');
   if (!spaceId) return c.json({ error: 'spaceId is required' }, 400);
   if (!(await canViewSpace(user.id, spaceId))) return c.json({ error: 'Forbidden' }, 403);
-  const rows = await db.select().from(llmSuggestions).where(sql`space_id = ${spaceId} AND status = 'pending'`).limit(200);
+  const pageId = c.req.query('pageId');
+  const where = pageId
+    ? sql`space_id = ${spaceId} AND status = 'pending' AND page_id = ${pageId}::uuid`
+    : sql`space_id = ${spaceId} AND status = 'pending'`;
+  const rows = await db.select().from(llmSuggestions).where(where).limit(200);
   return c.json({ suggestions: rows });
 });
 
@@ -186,6 +201,19 @@ llmWikiRoutes.post('/suggestions/:id/ignore', async (c) => {
   if (!suggestion) return c.json({ error: 'Not found' }, 404);
   if (!(await canEditSpace(user.id, suggestion.spaceId))) return c.json({ error: 'Forbidden' }, 403);
   const [updated] = await db.update(llmSuggestions).set({ status: 'ignored', updatedAt: sql`now()` }).where(eq(llmSuggestions.id, c.req.param('id'))).returning();
+  return c.json({ suggestion: updated });
+});
+
+// Revert a previously accepted suggestion. Restores the suggestion to
+// `pending` and undoes the side-effect it caused (topic / edge). Keeps
+// every AI-driven change reversible (trustworthy-AI acceptance criterion).
+llmWikiRoutes.post('/suggestions/:id/undo', async (c) => {
+  const user = c.get('user');
+  const [suggestion] = await db.select().from(llmSuggestions).where(eq(llmSuggestions.id, c.req.param('id'))).limit(1);
+  if (!suggestion) return c.json({ error: 'Not found' }, 404);
+  if (!(await canEditSpace(user.id, suggestion.spaceId))) return c.json({ error: 'Forbidden' }, 403);
+  await undoSuggestion(c.req.param('id'));
+  const [updated] = await db.select().from(llmSuggestions).where(eq(llmSuggestions.id, c.req.param('id'))).limit(1);
   return c.json({ suggestion: updated });
 });
 

@@ -5,7 +5,7 @@ import { env } from '../env';
 import { createAiProviderForContext, isAiDisabledError, vectorToSqlLiteral, type AiProvider } from './ai.service';
 import * as metrics from './job-metrics';
 import { chunkText, tokenizeChineseFriendly } from '../utils/text';
-import { generateWikiArtifacts } from './wiki.service';
+import { generateWikiArtifacts, markTopicsStaleForPage, refreshTopicSuggestions } from './wiki.service';
 
 export interface EnqueueInput {
   workspaceId?: string;
@@ -178,6 +178,18 @@ async function processPageLlm(job: any) {
     );
   }
 
+  // M5-stale: a re-processed page may have changed the source material of
+  // topics it backs. Flag those topics stale (do NOT silently overwrite)
+  // so the user can refresh them deliberately.
+  try {
+    await markTopicsStaleForPage(page.id);
+  } catch (err) {
+    console.error(
+      `[wiki] stale marking failed for page ${page.id}:`,
+      err instanceof Error ? err.message : err
+    );
+  }
+
   metrics.recordSuccess(job.type);
 }
 
@@ -209,6 +221,7 @@ export async function runOneJob(workerId = `worker-${process.pid}`): Promise<boo
   metrics.recordProcessed();
   try {
     if (job.type === 'page.process_llm') await processPageLlm(job);
+    else if (job.type === 'topic.refresh_suggestions') await refreshTopicSuggestions(job.entity_id);
     await db.execute(sql`UPDATE jobs SET status = 'succeeded', updated_at = now() WHERE id = ${job.id}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

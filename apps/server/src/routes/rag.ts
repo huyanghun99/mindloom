@@ -4,8 +4,8 @@ import { eq, desc } from 'drizzle-orm';
 import { ragAskSchema } from '@mindloom/shared';
 import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { rateLimitMiddleware } from '../middleware/rate-limit';
-import { askRag } from '../services/rag.service';
-import { isAiDisabledError } from '../services/ai.service';
+import { askRag, streamRag } from '../services/rag.service';
+import { isAiDisabledError, createAiProviderForContext } from '../services/ai.service';
 import { db } from '../db/client';
 import { ragSessions } from '@mindloom/db';
 
@@ -28,25 +28,61 @@ ragRoutes.post('/ask', rateLimitMiddleware('rag.ask'), zValidator('json', ragAsk
   return c.json({ ...answer, sessionId: session.id });
 });
 
+// Real Server-Sent-Events stream. Events arrive in this order:
+//   sources -> token* -> citation* -> done (with sessionId) | error
+// so the client can show provenance *before* the answer text.
 ragRoutes.post('/ask/stream', rateLimitMiddleware('rag.ask.stream'), zValidator('json', ragAskSchema), async (c) => {
   const user = c.get('user');
   const input = c.req.valid('json');
-  let answer;
+
+  // Pre-check the space policy. A disabled space must not even open the stream.
   try {
-    answer = await askRag({ userId: user.id, ...input });
+    await createAiProviderForContext({ workspaceId: input.workspaceId, spaceId: input.spaceId, userId: user.id });
   } catch (err) {
     if (isAiDisabledError(err)) return c.json({ error: 'AI is disabled for this space' }, 403);
     throw err;
   }
+
   const stream = new ReadableStream({
     async start(controller) {
       const encoder = new TextEncoder();
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: answer.answer, done: false })}\n\n`));
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true, citations: answer.citations })}\n\n`));
-      controller.close();
+      const send = (event: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+
+      let citations: unknown[] = [];
+      let answer = '';
+      let sessionId: string | undefined;
+      try {
+        for await (const ev of streamRag({ userId: user.id, ...input })) {
+          if (ev.type === 'sources') citations = ev.citations;
+          if (ev.type === 'done') {
+            answer = ev.answer;
+            // Persist the session so it shows up in history.
+            const [session] = await db.insert(ragSessions).values({
+              workspaceId: input.workspaceId, spaceId: input.spaceId ?? null, userId: user.id,
+              query: input.query, answer, citations
+            }).returning();
+            sessionId = session?.id;
+            send({ type: 'done', answer, sessionId });
+            continue;
+          }
+          send(ev);
+        }
+      } catch (err) {
+        send({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+      } finally {
+        controller.close();
+      }
     }
   });
-  return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    }
+  });
 });
 
 ragRoutes.get('/sessions', async (c) => {

@@ -91,11 +91,14 @@ export async function hybridSearch(params: {
   query: string;
   limit: number;
   mode?: 'keyword' | 'vector' | 'hybrid';
+  /** When set, restrict results to chunks of this single page. */
+  pageId?: string;
 }): Promise<HybridSearchResult[]> {
   const mode = params.mode ?? 'hybrid';
   const readable = params.spaceId ? [params.spaceId] : await getReadableSpaceIds(params.userId, params.workspaceId);
   if (readable.length === 0) return [];
   const ftsQuery = tokenizeChineseFriendly(params.query);
+  const pageFilter = params.pageId ? sql` AND page_id = ${params.pageId}::uuid` : sql``;
 
   const useKeyword = mode === 'keyword' || mode === 'hybrid';
   const useVector = mode === 'vector' || mode === 'hybrid';
@@ -108,6 +111,7 @@ export async function hybridSearch(params: {
       WHERE workspace_id = ${params.workspaceId}
         AND space_id = ANY(ARRAY[${sql.join(readable.map((id) => sql`${id}::uuid`), sql`, `)}])
         AND to_tsvector('simple', fts_tokens) @@ plainto_tsquery('simple', ${ftsQuery})
+        ${pageFilter}
       ORDER BY score DESC
       LIMIT ${params.limit * 3}
     `)
@@ -133,6 +137,7 @@ export async function hybridSearch(params: {
             WHERE workspace_id = ${params.workspaceId}
               AND space_id = ANY(ARRAY[${sql.join(readable.map((id) => sql`${id}::uuid`), sql`, `)}])
               AND embedding IS NOT NULL
+              ${pageFilter}
             ORDER BY embedding <=> ${vectorLiteral}::vector
             LIMIT ${params.limit * 3}
           `);

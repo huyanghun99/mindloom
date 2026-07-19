@@ -52,7 +52,10 @@ export const searchSchema = z.object({
 });
 
 export const ragAskSchema = searchSchema.extend({
-  extendedThinking: z.boolean().default(false)
+  extendedThinking: z.boolean().default(false),
+  // When provided, RAG is scoped to a single page (used by the
+  // right-panel "ask this page" feature).
+  pageId: z.string().uuid().optional()
 });
 
 export const captureSchema = z.object({

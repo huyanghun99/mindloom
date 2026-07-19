@@ -3,6 +3,9 @@ import { zValidator } from '@hono/zod-validator';
 import { createPageSchema, updatePageSchema, restoreRevisionSchema } from '@mindloom/shared';
 import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { canEditPage, canEditSpace, canViewPage, canViewSpace } from '../services/permission.service';
+import { db } from '../db/client';
+import { eq, sql } from 'drizzle-orm';
+import { pages, pageAiProfiles, llmSuggestions } from '@mindloom/db';
 import {
   createPage,
   deletePage,
@@ -64,6 +67,30 @@ pageRoutes.get('/:pageId', async (c) => {
   const page = await getPageDetail(pageId);
   if (!page) return c.json({ error: 'Not found' }, 404);
   return c.json({ page });
+});
+
+// Per-page AI profile powering the right-panel summary / tags. Falls back to a
+// text slice when the page has not been LLM-processed yet.
+pageRoutes.get('/:pageId/ai-profile', async (c) => {
+  const user = c.get('user');
+  const pageId = c.req.param('pageId');
+  if (!(await canViewPage(user.id, pageId))) return c.json({ error: 'Forbidden' }, 403);
+  const [profile] = await db.select().from(pageAiProfiles).where(eq(pageAiProfiles.pageId, pageId)).limit(1);
+  if (profile) {
+    return c.json({ profile: { summary: profile.summary, tags: profile.tags, keywords: profile.keywords } });
+  }
+  const [page] = await db.select({ text: pages.textContent }).from(pages).where(eq(pages.id, pageId)).limit(1);
+  const summary = (page?.text ?? '').slice(0, 240);
+  return c.json({ profile: { summary, tags: [], keywords: [] } });
+});
+
+// Pending AI suggestions that concern this specific page (right-panel "主题建议").
+pageRoutes.get('/:pageId/suggestions', async (c) => {
+  const user = c.get('user');
+  const pageId = c.req.param('pageId');
+  if (!(await canViewPage(user.id, pageId))) return c.json({ error: 'Forbidden' }, 403);
+  const rows = await db.select().from(llmSuggestions).where(sql`page_id = ${pageId}::uuid AND status = 'pending'`).limit(100);
+  return c.json({ suggestions: rows });
 });
 
 pageRoutes.put('/:pageId', zValidator('json', updatePageSchema), async (c) => {
