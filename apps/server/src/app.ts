@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { existsSync } from 'node:fs';
+import { env } from './env';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { csrfGuard } from './middleware/csrf';
 import { authRoutes } from './routes/auth';
@@ -23,7 +24,14 @@ import { healthHandler, diagnosticsHandler } from './routes/health';
 
 export function createApp() {
   const app = new Hono();
-  app.use('*', cors({ origin: ['http://127.0.0.1:5173', 'http://localhost:5173'], credentials: true }));
+  // In development reflect the request Origin so the UI is reachable via the
+  // Vite network URL or an IDE-forwarded port (credentials require a concrete
+  // origin, not "*"). Production/test stay on the explicit allow-list.
+  const corsOrigin =
+    env.NODE_ENV === 'development'
+      ? (origin: string | undefined) => origin ?? ''
+      : ['http://127.0.0.1:5173', 'http://localhost:5173'];
+  app.use('*', cors({ origin: corsOrigin, credentials: true }));
   app.use('*', csrfGuard);
   app.get('/health', healthHandler);
   app.get('/health/', healthHandler);

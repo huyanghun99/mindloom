@@ -47,15 +47,18 @@ async function resolveNodeLabels(nodeRefs: Set<string>): Promise<GraphNode[]> {
   }
   const nodes: GraphNode[] = [];
   if (pageIds.length > 0) {
-    const rows = await db.execute<{ id: string; title: string }>(sql`SELECT id, title FROM pages WHERE id = ANY(${pageIds}::uuid[])`);
+    const list = sql.join(pageIds.map((id) => sql`${id}::uuid`), sql`, `);
+    const rows = await db.execute<{ id: string; title: string }>(sql`SELECT id, title FROM pages WHERE id IN (${list})`);
     for (const r of rows.rows) nodes.push({ id: r.id, type: 'page', label: r.title });
   }
   if (topicIds.length > 0) {
-    const rows = await db.execute<{ id: string; title: string }>(sql`SELECT id, title FROM wiki_topics WHERE id = ANY(${topicIds}::uuid[])`);
+    const list = sql.join(topicIds.map((id) => sql`${id}::uuid`), sql`, `);
+    const rows = await db.execute<{ id: string; title: string }>(sql`SELECT id, title FROM wiki_topics WHERE id IN (${list})`);
     for (const r of rows.rows) nodes.push({ id: r.id, type: 'topic', label: r.title });
   }
   if (entityIds.length > 0) {
-    const rows = await db.execute<{ id: string; name: string }>(sql`SELECT id, name FROM entities WHERE id = ANY(${entityIds}::uuid[])`);
+    const list = sql.join(entityIds.map((id) => sql`${id}::uuid`), sql`, `);
+    const rows = await db.execute<{ id: string; name: string }>(sql`SELECT id, name FROM entities WHERE id IN (${list})`);
     for (const r of rows.rows) nodes.push({ id: r.id, type: 'entity', label: r.name });
   }
   return nodes;

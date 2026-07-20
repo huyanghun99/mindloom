@@ -25,14 +25,30 @@ function allowedOrigins(): Set<string> {
       /* ignore malformed base url */
     }
   }
+  if (env.WEB_ORIGINS) {
+    for (const o of env.WEB_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)) {
+      try {
+        set.add(new URL(o).origin);
+      } catch {
+        set.add(o);
+      }
+    }
+  }
   return set;
 }
+
+// In development we accept any web origin so the UI can be reached via the
+// Vite network URL or an IDE-forwarded port without fiddling with allow-lists.
+// Tests run under NODE_ENV=test, so this never weakens the CSRF guard there.
+const DEV_ALLOW_ANY = env.NODE_ENV === 'development';
 
 const ALLOWED = allowedOrigins();
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export const csrfGuard = createMiddleware(async (c, next) => {
   if (!MUTATING.has(c.req.method)) return next();
+  // Development: accept any web origin (UI reachable via network/forwarded URL).
+  if (DEV_ALLOW_ANY) return next();
   const origin = c.req.header('origin');
   // No Origin header -> same-origin / test harness -> allow.
   if (!origin) return next();

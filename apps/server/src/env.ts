@@ -5,6 +5,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(39280),
   APP_SECRET: z.string().min(16).default('development-secret-change-me-now'),
   PUBLIC_BASE_URL: z.string().default('http://127.0.0.1:39280'),
+  WEB_ORIGINS: z.string().optional().default(''),
   ALLOW_SIGNUP: z.coerce.boolean().default(true),
   DATABASE_URL: z.string().default('postgres://mindloom:mindloom@127.0.0.1:5432/mindloom'),
   EMBEDDING_DIMENSION: z.coerce.number().int().positive().default(1536),
