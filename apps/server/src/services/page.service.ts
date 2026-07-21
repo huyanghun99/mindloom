@@ -101,12 +101,44 @@ export async function updatePage(
     title?: string;
     contentJson?: unknown;
     textContent?: string;
-    contentVersion: number;
+    contentVersion?: number;
     autosave?: boolean;
+    parentPageId?: string | null;
+    position?: number;
   }
 ): Promise<UpdateResult> {
   const current = await repo.getPageDetail(pageId);
   if (!current) return { ok: false, reason: 'notfound' };
+
+  // --- Move / reorder (Phase 6) -------------------------------------------
+  // Lightweight: never bumps contentVersion and never re-enqueues an LLM job,
+  // so dragging a page around the tree is instant and side-effect free.
+  const wantsMove = input.parentPageId !== undefined || input.position !== undefined;
+  if (wantsMove) {
+    const newParent = input.parentPageId !== undefined ? input.parentPageId : current.parentPageId;
+    await db
+      .update(pages)
+      .set({ parentPageId: newParent, updatedAt: sql`now()` })
+      .where(eq(pages.id, pageId));
+    if (input.position !== undefined) {
+      // Make room: shift every sibling at/after the target slot up by one.
+      await db
+        .update(pages)
+        .set({ position: sql`${pages.position} + 1` })
+        .where(
+          and(
+            eq(pages.spaceId, current.spaceId),
+            sql`parent_page_id IS NOT DISTINCT FROM ${newParent}`,
+            eq(pages.status, 'normal'),
+            sql`position >= ${input.position}`,
+            sql`id != ${pageId}`
+          )
+        );
+      await db.update(pages).set({ position: input.position }).where(eq(pages.id, pageId));
+    }
+    const updated = await repo.getPageDetail(pageId);
+    return { ok: true, page: updated };
+  }
 
   const policy = await getSpacePolicy(current.spaceId);
   const nextContentJson = input.contentJson ?? current.contentJson;
@@ -128,7 +160,7 @@ export async function updatePage(
           updatedById: user.id,
           updatedAt: sql`now()`
         })
-        .where(and(eq(pages.id, pageId), eq(pages.contentVersion, input.contentVersion)))
+        .where(and(eq(pages.id, pageId), eq(pages.contentVersion, input.contentVersion ?? current.contentVersion)))
         .returning();
       if (!u) throw new CASConflict();
 

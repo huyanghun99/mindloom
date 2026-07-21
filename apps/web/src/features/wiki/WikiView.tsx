@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Brain, Check, Layers, Link2, Network, Pause, Play, Plus, RefreshCw, RotateCcw, X, Zap } from 'lucide-react';
-import { api, post } from '../../api';
 import { useAdaptivePolling } from '../../hooks/useAdaptivePolling';
+import { Brain, Check, Layers, Link2, Network, Pause, Play, Plus, RefreshCw, RotateCcw, X, Zap } from 'lucide-react';
+import { api, post, skipPageLlm } from '../../api';
+import { useToast } from '../../components/Toast';
 import { EmptyState } from '../../components/EmptyState';
+import { SuggestionCard, SuggestionAccepted, suggestionTitle, HighRiskModal } from './SuggestionCard';
 import type { Space, WikiSuggestion } from '../../types';
 
 type WikiTopic = {
@@ -11,42 +13,26 @@ type WikiTopic = {
   aiSummary: string; textContent?: string; createdAt?: string;
 };
 
-const SUGGESTION_TYPE_LABEL: Record<string, string> = {
-  topic_proposal: '主题提案', cross_link: '关联建议', link_suggestion: '关联建议',
-  outdated_topic: '主题待更新', stale_topic: '主题待更新'
-};
-const RISK_LABEL: Record<string, string> = { low: '低风险', medium: '中风险', high: '高风险' };
+type InboxItem = { id: string; title: string; llmProcessStatus: string; updatedAt?: string };
+
+type WikiError = { id: string; title: string; wikiErrorMessage: string };
+
 const TOPIC_STATUS_LABEL: Record<string, string> = {
   suggested: '待审阅', accepted: '已采纳', user_edited: '已编辑', stale: '待更新', archived: '已归档'
 };
-
-function suggestionSummary(s: WikiSuggestion): { title: string; desc: string } {
-  if (s.type === 'topic_proposal') {
-    const p = s.payload as { topicTitle?: string; topicSummary?: string };
-    return { title: `提议新主题：${p.topicTitle ?? '未命名'}`, desc: p.topicSummary || 'AI 从笔记中提炼出的候选主题，审阅后可纳入知识库。' };
-  }
-  if (s.type === 'cross_link' || s.type === 'link_suggestion') {
-    const p = s.payload as { targetPageTitle?: string; reason?: string };
-    return { title: `关联笔记：${p.targetPageTitle ?? '相关页面'}`, desc: p.reason || '内容主题高度相关，建议建立双向链接。' };
-  }
-  if (s.type === 'outdated_topic' || s.type === 'stale_topic') {
-    const p = s.payload as { topicTitle?: string };
-    return { title: `主题待更新：${p.topicTitle ?? '某主题'}`, desc: '源笔记有改动，建议重新生成该主题内容。' };
-  }
-  return { title: s.type, desc: '' };
-}
+const INBOX_STATUS_LABEL: Record<string, string> = {
+  pending: '待整理', processing: '整理中', processed: '已整理', failed: '整理失败', ignored: '已忽略'
+};
 
 export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id: string) => void }) {
   const qc = useQueryClient();
+  const toast = useToast();
   const [tab, setTab] = useState<'inbox' | 'suggestions' | 'topics'>('inbox');
 
-  // Adaptive polling (Phase 2): faster when there is activity, off when hidden.
-  // `hasActivity` is derived from the list data via an effect below, so the hook
-  // can be declared before the queries that bind `refetchInterval: poll`.
   const [hasActivity, setHasActivity] = useState(false);
   const poll = useAdaptivePolling({ enabled: !!space, hasActivity });
 
-  const { data: inboxData, isLoading: inboxLoading } = useQuery<{ inbox: { id: string; title: string; llmProcessStatus: string }[] }>({
+  const { data: inboxData, isLoading: inboxLoading } = useQuery<{ inbox: InboxItem[] }>({
     queryKey: ['inbox', space.id], queryFn: () => api(`/api/llm-wiki/inbox?spaceId=${space.id}`), refetchInterval: poll
   });
   const inbox = inboxData?.inbox ?? [];
@@ -66,40 +52,66 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
   });
   const topics = topicData?.topics ?? [];
 
+  // Phase 0 task 6: surface pages whose Wiki artifact generation failed.
+  const { data: wikiErrData } = useQuery<{ errors: WikiError[] }>({
+    queryKey: ['wiki-errors', space.id], queryFn: () => api(`/api/llm-wiki/spaces/${space.id}/wiki-errors`), refetchInterval: poll
+  });
+  const wikiErrors = wikiErrData?.errors ?? [];
+
   useEffect(() => {
     setHasActivity(inbox.length > 0 || suggestions.length > 0 || topics.length > 0);
   }, [inbox, suggestions, topics]);
 
-  const processNow = useMutation({
-    mutationFn: (pageId: string) => post(`/api/llm-wiki/pages/${pageId}/process-now`, {}),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['inbox', space.id] })
-  });
-  const toggleAuto = useMutation({
-    mutationFn: () => post(`/api/llm-wiki/spaces/${space.id}/${autoOn ? 'pause' : 'resume'}`, {}),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['wiki-space', space.id] })
-  });
   const reprocess = useMutation({
     mutationFn: () => post(`/api/llm-wiki/spaces/${space.id}/reprocess`, {}),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['inbox', space.id] });
       qc.invalidateQueries({ queryKey: ['suggestions', space.id] });
       qc.invalidateQueries({ queryKey: ['topics', space.id] });
-    }
+      toast.success('已重新生成全部 Wiki 产物');
+    },
+    onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
+  });
+  const toggleAuto = useMutation({
+    mutationFn: () => post(`/api/llm-wiki/spaces/${space.id}/${autoOn ? 'pause' : 'resume'}`, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['wiki-space', space.id] })
   });
 
+  /* ------------------------------------------------ LLM Inbox ------------ */
+  const [doneIds, setDoneIds] = useState<Set<string>>(new Set());
+  const markDone = (ids: string[]) => setDoneIds((p) => { const n = new Set(p); ids.forEach((i) => n.add(i)); return n; });
+
+  const bulkProcess = useMutation({
+    mutationFn: (ids: string[]) => Promise.all(ids.map((id) => post(`/api/llm-wiki/pages/${id}/process-now`, {}))),
+    onSuccess: () => { markDone(inbox.map((p) => p.id)); qc.invalidateQueries({ queryKey: ['inbox', space.id] }); toast.success('已加入处理队列'); },
+    onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
+  });
+  const bulkIgnore = useMutation({
+    mutationFn: (ids: string[]) => Promise.all(ids.map((id) => skipPageLlm(id))),
+    onSuccess: () => { markDone(inbox.map((p) => p.id)); qc.invalidateQueries({ queryKey: ['inbox', space.id] }); toast.success('已忽略收件箱中的页面'); },
+    onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
+  });
+
+  const processNow = useMutation({
+    mutationFn: (pageId: string) => post(`/api/llm-wiki/pages/${pageId}/process-now`, {}),
+    onSuccess: (_r, id) => { markDone([id]); qc.invalidateQueries({ queryKey: ['inbox', space.id] }); },
+    onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
+  });
+  const skipOne = useMutation({
+    mutationFn: (pageId: string) => skipPageLlm(pageId),
+    onSuccess: (_r, id) => { markDone([id]); qc.invalidateQueries({ queryKey: ['inbox', space.id] }); },
+    onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
+  });
+
+  /* --------------------------------------------- Suggestions (review) ---- */
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const toggleSel = (id: string) =>
-    setSelected((prev) => {
-      const n = new Set(prev);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
   const bulkAccept = useMutation({
     mutationFn: (ids: string[]) => post(`/api/llm-wiki/suggestions/bulk-accept`, { spaceId: space.id, ids }),
     onSuccess: () => { setSelected(new Set()); qc.invalidateQueries({ queryKey: ['suggestions', space.id] }); }
   });
   const [recentlyAccepted, setRecentlyAccepted] = useState<{ id: string; label: string }[]>([]);
+  const [highSugg, setHighSugg] = useState<WikiSuggestion | null>(null);
+  const [snoozed, setSnoozed] = useState<Set<string>>(new Set());
 
   const accept = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/accept`, {}),
@@ -107,7 +119,7 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
       setSelected(new Set());
       qc.invalidateQueries({ queryKey: ['suggestions', space.id] });
       const s = suggestions.find((x) => x.id === id);
-      if (s) setRecentlyAccepted((p) => [...p, { id, label: SUGGESTION_TYPE_LABEL[s.type] ?? s.type }]);
+      if (s) setRecentlyAccepted((p) => [...p, { id, label: suggestionTitle(s).title }]);
     }
   });
   const ignore = useMutation({
@@ -122,13 +134,26 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
     }
   });
 
-  // Review Center: batch-accept every *low-risk* pending suggestion in one shot.
-  const lowRiskIds = suggestions.filter((s) => s.risk === 'low').map((s) => s.id);
-  const bulkAcceptLow = () => {
-    if (lowRiskIds.length === 0) return;
-    bulkAccept.mutate(lowRiskIds);
-  };
+  // Low-risk (tag) suggestions are applied automatically — but transparently,
+  // via a toast — so the user always knows what changed (never "secret" edits).
+  const autoHandled = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const s of suggestions) {
+      if (s.risk === 'low' && !autoHandled.current.has(s.id)) {
+        autoHandled.current.add(s.id);
+        const label = (s.payload as { topicTitle?: string; targetPageTitle?: string })?.topicTitle
+          ?? (s.payload as { targetPageTitle?: string })?.targetPageTitle
+          ?? (s.type === 'topic_proposal' ? '新主题' : '关联');
+        accept.mutate(s.id);
+        toast.info(`已自动添加标签：${label}`);
+      }
+    }
+  }, [suggestions, accept, toast]);
 
+  const lowRiskIds = suggestions.filter((s) => s.risk === 'low').map((s) => s.id);
+  const visibleSuggestions = suggestions.filter((s) => !snoozed.has(s.id));
+
+  /* ----------------------------------------------------- Topics ---------- */
   const [activeTopic, setActiveTopic] = useState<WikiTopic | null>(null);
   const { data: topicSources } = useQuery<{ sources: { id: string; title: string }[] }>({
     queryKey: ['topic-sources', activeTopic?.id], enabled: !!activeTopic,
@@ -143,7 +168,8 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
   });
   const refreshTopic = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/topics/${id}/refresh-suggestions`, {}),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['suggestions', space.id] })
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['suggestions', space.id] }); qc.invalidateQueries({ queryKey: ['topics', space.id] }); toast.success('已提交重新生成，稍后查看结果'); },
+    onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
   });
   const undoTopicM = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/topics/${id}/undo`, {}),
@@ -163,12 +189,26 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
 
   const TABS: { key: typeof tab; label: string; icon: React.ReactNode; count: number }[] = [
     { key: 'inbox', label: 'Inbox', icon: <Layers size={16} />, count: inbox.length },
-    { key: 'suggestions', label: '建议', icon: <Brain size={16} />, count: suggestions.length },
+    { key: 'suggestions', label: '建议', icon: <Brain size={16} />, count: visibleSuggestions.length },
     { key: 'topics', label: 'Topic Center', icon: <Network size={16} />, count: topics.length }
   ];
 
   return (
     <div className="wiki-view">
+      {wikiErrors.length > 0 && (
+        <div className="wiki-errors-banner">
+          <b>⚠ {wikiErrors.length} 篇笔记的 Wiki 产物生成失败</b>
+          <ul>
+            {wikiErrors.map((e) => (
+              <li key={e.id}>
+                <span className="muted small">{e.title}</span>
+                <span className="wiki-err-msg">{e.wikiErrorMessage}</span>
+                <button className="ghost sm" disabled={processNow.isPending} onClick={() => processNow.mutate(e.id)}>重试</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="wiki-tabs">
         {TABS.map((t) => (
           <button key={t.key} className={`wiki-tab${tab === t.key ? ' active' : ''}`} onClick={() => setTab(t.key)}>
@@ -187,22 +227,47 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
 
       {tab === 'inbox' && (
         <div className="wiki-pane">
+          {inbox.length > 0 && (
+            <div className="batch-bar">
+              <span className="muted small">待处理 {inbox.length} 篇</span>
+              <div className="spacer" />
+              <button className="ghost sm" disabled={bulkProcess.isPending} onClick={() => bulkProcess.mutate(inbox.map((p) => p.id))}>
+                <Check size={14} /> 全部标记已处理
+              </button>
+              <button className="ghost sm" disabled={bulkIgnore.isPending} onClick={() => bulkIgnore.mutate(inbox.map((p) => p.id))}>
+                <X size={14} /> 全部忽略
+              </button>
+            </div>
+          )}
           {inboxLoading && <div className="muted small">加载中…</div>}
           {!inboxLoading && inbox.length === 0 && (
             <EmptyState icon={<Layers size={36} />} title="收件箱为空" hint="新建或编辑笔记后会自动进入 LLM 处理队列，处理完成后将生成主题与建议。" />
           )}
-          {inbox.map((p) => (
-            <div className="wiki-row" key={p.id}>
-              <div className="wiki-row-main">
-                <b>{p.title || '未命名笔记'}</b>
-                <span className="muted small">{p.llmProcessStatus}</span>
+          {inbox.map((p) => {
+            const done = doneIds.has(p.id);
+            return (
+              <div className={`wiki-row inbox-row${done ? ' done' : ''}`} key={p.id}>
+                <div className="wiki-row-main">
+                  <b>{p.title || '未命名笔记'}</b>
+                  <span className="muted small inbox-meta">
+                    {p.updatedAt ? `修改于 ${new Date(p.updatedAt).toLocaleString()}` : '修改时间未知'}
+                    <span className={`inbox-status status-${p.llmProcessStatus}`}>{INBOX_STATUS_LABEL[p.llmProcessStatus] ?? p.llmProcessStatus}</span>
+                  </span>
+                </div>
+                <div className="wiki-row-actions">
+                  {done
+                    ? <span className="accept-check static"><Check size={14} /> {p.llmProcessStatus === 'ignored' ? '已忽略' : '已处理'}</span>
+                    : (
+                      <>
+                        <button className="ghost" onClick={() => onOpenPage(p.id)}>打开</button>
+                        <button className="ghost" disabled={skipOne.isPending} onClick={() => skipOne.mutate(p.id)}><X size={14} /> 忽略</button>
+                        <button className="ghost ok" disabled={processNow.isPending} onClick={() => processNow.mutate(p.id)}><Zap size={14} /> 立即处理</button>
+                      </>
+                    )}
+                </div>
               </div>
-              <div className="wiki-row-actions">
-                <button className="ghost" onClick={() => onOpenPage(p.id)}>打开</button>
-                <button className="ghost" disabled={processNow.isPending} onClick={() => processNow.mutate(p.id)}><Zap size={14} /> 立即处理</button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -210,62 +275,34 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
         <div className="wiki-pane">
           <div className="batch-bar">
             <label className="check-all">
-              <input type="checkbox" checked={selected.size === suggestions.length && suggestions.length > 0}
-                onChange={(e) => setSelected(e.target.checked ? new Set(suggestions.map((s) => s.id)) : new Set())} />
+              <input type="checkbox" checked={selected.size === visibleSuggestions.length && visibleSuggestions.length > 0}
+                onChange={(e) => setSelected(e.target.checked ? new Set(visibleSuggestions.map((s) => s.id)) : new Set())} />
               全选
             </label>
-            <span className="muted small">已选 {selected.size} / {suggestions.length}</span>
+            <span className="muted small">已选 {selected.size} / {visibleSuggestions.length}</span>
             <div className="spacer" />
-            <button className="ghost sm" disabled={lowRiskIds.length === 0 || bulkAccept.isPending} onClick={bulkAcceptLow} title="一次性接受所有低风险建议">
+            <button className="ghost sm" disabled={lowRiskIds.length === 0 || bulkAccept.isPending} onClick={() => bulkAccept.mutate(lowRiskIds)} title="一次性接受所有低风险建议">
               <Check size={14} /> 批量接受低风险（{lowRiskIds.length}）
             </button>
             <button className="primary sm" disabled={selected.size === 0 || bulkAccept.isPending} onClick={() => bulkAccept.mutate([...selected])}>
               <Check size={14} /> 批量接受
             </button>
           </div>
-          {suggestions.length === 0 && <EmptyState icon={<Brain size={36} />} title="暂无待审阅建议" hint="处理笔记后会由 AI 生成主题提案与关联建议。" />}
-          {suggestions.map((s) => {
-            const sum = suggestionSummary(s);
-            const p = s.payload as { topicTitle?: string; targetPageTitle?: string; changes?: string; reason?: string; evidence?: Record<string, unknown> };
-            const checked = selected.has(s.id);
-            return (
-              <div className={`wiki-row sugg${checked ? ' checked' : ''}`} key={s.id}>
-                <input type="checkbox" className="row-check" checked={checked} onChange={() => toggleSel(s.id)} />
-                <div className="wiki-row-main">
-                  <div className="sugg-head">
-                    <span className="tag">{SUGGESTION_TYPE_LABEL[s.type] ?? s.type}</span>
-                    <span className={`risk risk-${s.risk}`}>{RISK_LABEL[s.risk] ?? s.risk}</span>
-                    <b>{sum.title}</b>
-                  </div>
-                  {p.changes && <p className="sugg-changes">将改变：{p.changes}</p>}
-                  {p.reason && <p className="muted small">原因：{p.reason}</p>}
-                  {s.type === 'stale_topic' && <p className="tag stale-badge">内容可能已过时</p>}
-                  <p className="muted small">{sum.desc}</p>
-                </div>
-                <div className="wiki-row-actions">
-                  {s.type === 'topic_proposal' && s.topicId && (
-                    <button className="ghost" onClick={() => { const t = topics.find((x) => x.id === s.topicId); setTab('topics'); if (t) setActiveTopic(t); }}>查看主题</button>
-                  )}
-                  {s.type === 'cross_link' && (s.payload as { targetPageId?: string }).targetPageId && (
-                    <button className="ghost" onClick={() => onOpenPage((s.payload as { targetPageId: string }).targetPageId!)}><Link2 size={14} /> 打开</button>
-                  )}
-                  <button className="ghost danger" disabled={ignore.isPending} onClick={() => ignore.mutate(s.id)}><X size={14} /> 忽略</button>
-                  <button className="ghost ok" disabled={accept.isPending} onClick={() => accept.mutate(s.id)}><Check size={14} /> 接受</button>
-                </div>
-              </div>
-            );
-          })}
+          {visibleSuggestions.length === 0 && recentlyAccepted.length === 0 && (
+            <EmptyState icon={<Brain size={36} />} title="暂无待审阅建议" hint="处理笔记后会由 AI 生成主题提案与关联建议。" />
+          )}
+          {visibleSuggestions.map((s) => (
+            <SuggestionCard
+              key={s.id}
+              s={s}
+              onAccept={(x) => accept.mutate(x.id)}
+              onIgnore={(x) => ignore.mutate(x.id)}
+              onSnooze={(x) => setSnoozed((p) => new Set(p).add(x.id))}
+              onAcceptHigh={(x) => setHighSugg(x)}
+            />
+          ))}
           {recentlyAccepted.map((a) => (
-            <div className="wiki-row sugg accepted" key={a.id}>
-              <div className="wiki-row-main">
-                <span className="tag ok-badge">已接受</span>
-                <b>{a.label}</b>
-                <p className="muted small">所有 AI 修改均可撤销。</p>
-              </div>
-              <div className="wiki-row-actions">
-                <button className="ghost" disabled={undo.isPending} onClick={() => undo.mutate(a.id)}><RotateCcw size={14} /> 撤销</button>
-              </div>
-            </div>
+            <SuggestionAccepted key={a.id} label={a.label} onUndo={() => undo.mutate(a.id)} />
           ))}
         </div>
       )}
@@ -282,6 +319,15 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
             {topics.map((t) => (
               <button key={t.id} className={`topic-item${activeTopic?.id === t.id ? ' active' : ''}`} onClick={() => setActiveTopic(t)}>
                 <div><b>{t.title}</b><span className={`tag status-${t.status}`}>{TOPIC_STATUS_LABEL[t.status] ?? t.status}</span></div>
+                {t.status === 'stale' && (
+                  <button
+                    className="stale-updated"
+                    title="来源页面已更新，点击重新生成"
+                    onClick={(e) => { e.stopPropagation(); refreshTopic.mutate(t.id); }}
+                  >
+                    <RefreshCw size={11} /> 来源已更新
+                  </button>
+                )}
                 {t.aiSummary && <p className="muted small topic-sum">{t.aiSummary}</p>}
               </button>
             ))}
@@ -303,7 +349,9 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
                     <button className="ghost" disabled={undoTopicM.isPending} onClick={() => undoTopicM.mutate(activeTopic.id)}><RotateCcw size={14} /> 撤销采纳</button>
                   )}
                   {activeTopic.status === 'stale' && (
-                    <span className="tag stale-badge">内容可能已过时</span>
+                    <button className="ghost stale-updated-btn" disabled={refreshTopic.isPending} onClick={() => refreshTopic.mutate(activeTopic.id)}>
+                      <RefreshCw size={14} /> 来源已更新 · 重新生成
+                    </button>
                   )}
                   <button className="ghost" disabled={refreshTopic.isPending} onClick={() => refreshTopic.mutate(activeTopic.id)}><RefreshCw size={14} /> 刷新建议</button>
                 </div>
@@ -318,6 +366,14 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
             )}
           </div>
         </div>
+      )}
+
+      {highSugg && (
+        <HighRiskModal
+          suggestion={highSugg}
+          onClose={() => setHighSugg(null)}
+          onConfirm={() => { accept.mutate(highSugg.id); setHighSugg(null); }}
+        />
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { useCallback, useRef, useState, useEffect } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
@@ -17,6 +17,9 @@ import TaskItem from '@tiptap/extension-task-item';
 import type { PMNode } from './prosemirror';
 import { emptyDoc, extractText } from './prosemirror';
 import { SlashCommand, type MediaKind } from './slash-command';
+import { EditorKeymap } from './editor-keymap';
+import { AiPopover, type AiRequest } from './AiPopover';
+import { AI_ACTIONS, type AiActionKind } from './ai-actions';
 import { Mermaid } from './Mermaid';
 import { Video, Audio, Pdf, FileCard } from './Media';
 import { Callout } from './Callout';
@@ -40,13 +43,53 @@ type RichEditorProps = {
   spaceId?: string;
   pageId?: string | null;
   onChange?: (payload: { contentJson: PMNode; textContent: string }) => void;
+  onSave?: () => void;
 };
 
-export function RichEditor({ content, editable = true, workspaceId, spaceId, pageId, onChange }: RichEditorProps) {
+/** Split plain AI output into paragraph nodes for insertion. */
+function textToParagraphs(text: string) {
+  return text
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block) => ({
+      type: 'paragraph',
+      content: block ? [{ type: 'text', text: block }] : []
+    }));
+}
+
+export function RichEditor({ content, editable = true, workspaceId, spaceId, pageId, onChange, onSave }: RichEditorProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<Editor | null>(null);
   const [pendingKind, setPendingKind] = useState<MediaKind>('image');
+  const [aiReq, setAiReq] = useState<AiRequest | null>(null);
   const toast = useToast();
+
+  // Distinguishes edits we emitted (local) from external `content` changes so
+  // the sync effect never clobbers in-progress typing (replaces the old
+  // full-document JSON.stringify comparison).
+  const lastJsonRef = useRef<string>('');
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+
+  // Open the streaming AI popover for a selection or block.
+  const openAi = useCallback((kind: AiActionKind, sourceText: string, anchor: { top: number; left: number }, range: { from: number; to: number } | null) => {
+    const ed = editorRef.current;
+    if (!ed) return;
+    const insertAt = range ? range.to : ed.state.selection.to;
+    setAiReq({
+      kind,
+      sourceText,
+      anchor,
+      onReplace: range && AI_ACTIONS[kind].canReplace
+        ? (t) => ed.chain().focus().insertContentAt({ from: range.from, to: range.to }, t).run()
+        : undefined,
+      onInsert: (t) => {
+        const nodes = textToParagraphs(t);
+        ed.chain().focus().insertContentAt(insertAt, nodes.length ? nodes : t).run();
+      }
+    });
+  }, []);
 
   const uploads = useUploads({
     getEditor: () => editorRef.current,
@@ -121,8 +164,32 @@ export function RichEditor({ content, editable = true, workspaceId, spaceId, pag
       Embed,
       Drawio,
       Excalidraw,
-      SlashCommand.configure({ onPickFile: (kind) => openFilePicker(kind) }),
-      MarkdownShortcuts
+      SlashCommand.configure({
+        onPickFile: (kind) => openFilePicker(kind),
+        onAiAction: (kind, range) => {
+          const ed = editorRef.current;
+          if (!ed) return;
+          const fullText = extractText(ed.getJSON() as PMNode).trim();
+          let rect: { top: number; left: number } = { top: window.innerHeight / 2, left: window.innerWidth / 2 };
+          try { const c = ed.view.coordsAtPos(range.from); rect = { top: c.bottom, left: c.left }; } catch { /* fall back to center */ }
+          ed.chain().focus().deleteRange(range).run();
+          const insertAt = ed.state.selection.to;
+          setAiReq({
+            kind,
+            sourceText: fullText,
+            anchor: rect,
+            onInsert: (t) => {
+              const nodes = textToParagraphs(t);
+              ed.chain().focus().insertContentAt(insertAt, nodes.length ? nodes : t).run();
+            }
+          });
+        }
+      }),
+      MarkdownShortcuts,
+      EditorKeymap.configure({
+        onSave: () => onSaveRef.current?.(),
+        onLink: () => (editorRef.current?.view.dom as HTMLElement | undefined)?.dispatchEvent(new CustomEvent('mindloom:edit-link'))
+      })
     ],
     content: content ?? emptyDoc,
     editorProps: {
@@ -149,23 +216,36 @@ export function RichEditor({ content, editable = true, workspaceId, spaceId, pag
         return true;
       }
     },
+    onCreate: ({ editor: ed }) => {
+      lastJsonRef.current = JSON.stringify(ed.getJSON());
+    },
     onUpdate: ({ editor: ed }) => {
       const json = ed.getJSON() as PMNode;
+      lastJsonRef.current = JSON.stringify(json);
       onChange?.({ contentJson: json, textContent: extractText(json) });
     }
   });
 
   editorRef.current = editor;
 
-  // Keep the editor in sync when the external `content` prop changes (e.g.
-  // after switching pages, receiving fresh server data, or restoring a draft).
-  // Compare JSON so we don't clobber the user's in-progress edits.
+  // Sync when the external `content` prop changes (page switch, fresh server
+  // data, draft/conflict resolution). We compare against the JSON we last
+  // emitted (lastJsonRef): if the incoming content equals our own edit echoed
+  // back, we skip; otherwise it is a genuine external update and we apply it
+  // while restoring the cursor position where possible.
   useEffect(() => {
     if (!editor) return;
     const target = (content ?? emptyDoc) as PMNode;
-    const current = editor.getJSON() as PMNode;
-    if (JSON.stringify(current) !== JSON.stringify(target)) {
-      editor.commands.setContent(target, false);
+    const targetStr = JSON.stringify(target);
+    if (targetStr === lastJsonRef.current) return;
+    const { from, to } = editor.state.selection;
+    editor.commands.setContent(target, false);
+    lastJsonRef.current = targetStr;
+    const size = editor.state.doc.content.size;
+    try {
+      editor.commands.setTextSelection({ from: Math.min(from, size), to: Math.min(to, size) });
+    } catch {
+      /* selection out of range after external replace — leave default */
     }
   }, [content, editor]);
 
@@ -175,8 +255,24 @@ export function RichEditor({ content, editable = true, workspaceId, spaceId, pag
     <div className="rich-editor">
       <EditorContent editor={editor} className="editor-content" />
 
-      <BubbleMenu editor={editor} />
+      <BubbleMenu
+        editor={editor}
+        onAi={workspaceId && spaceId ? (kind, text, anchor) => {
+          const { from, to } = editor.state.selection;
+          openAi(kind, text, anchor, { from, to });
+        } : undefined}
+      />
       <BlockHandle editor={editor} />
+
+      {aiReq && workspaceId && spaceId && (
+        <AiPopover
+          request={aiReq}
+          workspaceId={workspaceId}
+          spaceId={spaceId}
+          pageId={pageId ?? undefined}
+          onClose={() => setAiReq(null)}
+        />
+      )}
 
       <UploadOverlay
         items={uploads.items}

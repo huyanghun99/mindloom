@@ -34,6 +34,7 @@ export async function askRag(params: {
 
   const citations: Citation[] = results.map((r) => ({
     pageId: r.pageId,
+    topicId: r.topicId,
     chunkId: r.id,
     title: r.title,
     excerpt: r.content.slice(0, 260),
@@ -71,6 +72,7 @@ export async function* streamRag(params: {
     const results = await hybridSearch({ ...params });
     citations = results.map((r) => ({
       pageId: r.pageId,
+      topicId: r.topicId,
       chunkId: r.id,
       title: r.title,
       excerpt: r.content.slice(0, 260),

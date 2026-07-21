@@ -55,7 +55,7 @@ export function HomeView({ workspace, space, onSelectPage, onNavigate, onNewNote
     queryKey: ['page-tree', space.id], queryFn: () => api(`/api/pages/tree?spaceId=${space.id}`)
   });
   const flat = useMemo(() => flatten(treeData?.tree ?? []), [treeData]);
-  const recent = useMemo(() => [...flat].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '')).slice(0, 6), [flat]);
+  const recent = useMemo(() => [...flat].sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '')).slice(0, 5), [flat]);
   const favPages = useMemo(() => flat.filter((n) => favorites.has(n.id)).slice(0, 6), [flat, favorites]);
 
   const { data: inboxData } = useQuery<{ inbox: unknown[] }>({

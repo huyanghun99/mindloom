@@ -1,22 +1,18 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Brain, Check, Info, Link2, ListTree, Loader2, PanelRightClose, RotateCcw, Send, Star, X } from 'lucide-react';
-import { api, post, streamRag, getAiProfile, getPageSuggestions, undoSuggestion } from '../../api';
+import { Brain, Check, Link2, ListTree, Loader2, PanelRightClose, RefreshCw, Send, Tag as TagIcon, X } from 'lucide-react';
+import { api, post, streamRag, getAiProfile, getPageSuggestions, undoSuggestion, updatePageTags } from '../../api';
 import { setPendingScroll } from '../../editor/scrollTo';
 import type { AiProfile } from '@mindloom/shared';
-import { countWords, type PMNode } from '../../editor/prosemirror';
+import { type PMNode } from '../../editor/prosemirror';
 import { extractOutline } from '../notes/outline';
 import { EmptyState } from '../../components/EmptyState';
 import { SkeletonList } from '../../components/Skeleton';
-import { useFavorites } from '../../hooks/useFavorites';
+import { useToast } from '../../components/Toast';
+import { SuggestionCard, SuggestionAccepted, suggestionTitle, HighRiskModal } from '../wiki/SuggestionCard';
 import type { PageDetail, Space, Workspace, WikiSuggestion } from '../../types';
 
-type Tab = 'outline' | 'related' | 'info' | 'ai';
-
-const STATUS_LABEL: Record<string, string> = {
-  pending: '待整理', processing: '整理中', done: '已整理', processed: '已整理',
-  failed: '整理失败', skipped: '已跳过', ignored: '未开启整理'
-};
+type Tab = 'summary' | 'tags' | 'related' | 'outline';
 
 function scrollToHeading(index: number) {
   const nodes = document.querySelectorAll('.editor-content h1, .editor-content h2, .editor-content h3, .editor-content h4, .editor-content h5, .editor-content h6');
@@ -31,8 +27,7 @@ export function RightPanel({ workspace, space, pageId, onOpenPage, onClose }: {
   onOpenPage: (id: string) => void;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<Tab>('outline');
-  const { isFavorite, toggle } = useFavorites();
+  const [tab, setTab] = useState<Tab>('summary');
 
   const { data } = useQuery<{ page: PageDetail }>({
     queryKey: ['page-detail', pageId],
@@ -42,13 +37,39 @@ export function RightPanel({ workspace, space, pageId, onOpenPage, onClose }: {
   const page = data?.page ?? null;
 
   const outline = useMemo(() => extractOutline(page?.contentJson as PMNode | undefined), [page?.contentJson]);
-  const words = useMemo(() => countWords(page?.textContent ?? ''), [page?.textContent]);
+
+  // Scroll-spy: highlight the heading currently in view so the outline tracks reading position.
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const visibleRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (tab !== 'outline' || outline.length === 0) return;
+    const root = document.querySelector('.center') as HTMLElement | null;
+    const headings = Array.from(
+      document.querySelectorAll('.editor-content h1, .editor-content h2, .editor-content h3, .editor-content h4, .editor-content h5, .editor-content h6')
+    ) as HTMLElement[];
+    if (headings.length === 0) return;
+    visibleRef.current.clear();
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const idx = headings.indexOf(e.target as HTMLElement);
+          if (idx < 0) continue;
+          if (e.isIntersecting) visibleRef.current.add(idx);
+          else visibleRef.current.delete(idx);
+        }
+        if (visibleRef.current.size > 0) setActiveIdx(Math.min(...Array.from(visibleRef.current)));
+      },
+      { root: root ?? null, rootMargin: '0px 0px -65% 0px', threshold: [0, 1] }
+    );
+    headings.forEach((h) => obs.observe(h));
+    return () => obs.disconnect();
+  }, [tab, outline, pageId]);
 
   const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
-    { key: 'outline', label: '大纲', icon: <ListTree size={15} /> },
-    { key: 'related', label: '关联', icon: <Link2 size={15} /> },
-    { key: 'info', label: '信息', icon: <Info size={15} /> },
-    { key: 'ai', label: 'AI 助手', icon: <Brain size={15} /> }
+    { key: 'summary', label: 'AI 摘要', icon: <Brain size={15} /> },
+    { key: 'tags', label: '标签', icon: <TagIcon size={15} /> },
+    { key: 'related', label: '相关页面', icon: <Link2 size={15} /> },
+    { key: 'outline', label: '大纲', icon: <ListTree size={15} /> }
   ];
 
   return (
@@ -56,7 +77,7 @@ export function RightPanel({ workspace, space, pageId, onOpenPage, onClose }: {
       <div className="rp-tabs">
         {TABS.map((t) => (
           <button key={t.key} className={`rp-tab${tab === t.key ? ' active' : ''}`} title={t.label} onClick={() => setTab(t.key)}>
-            {t.icon}
+            {t.icon}<span>{t.label}</span>
           </button>
         ))}
         <div className="spacer" />
@@ -64,86 +85,35 @@ export function RightPanel({ workspace, space, pageId, onOpenPage, onClose }: {
       </div>
 
       <div className="rp-body">
+        {tab === 'summary' && (
+          <SummaryTab workspace={workspace} space={space} pageId={pageId} onOpenPage={onOpenPage} />
+        )}
+        {tab === 'tags' && <TagsTab pageId={pageId} />}
+        {tab === 'related' && <RelatedTab pageId={pageId} onOpenPage={onOpenPage} />}
         {tab === 'outline' && (
           outline.length === 0
             ? <EmptyState icon={<ListTree size={28} />} title="暂无大纲" hint="在正文中添加标题，这里会自动生成目录。" />
             : (
               <div className="rp-outline">
                 {outline.map((h) => (
-                  <button key={h.id} className={`rp-outline-item lvl-${h.level}`} onClick={() => scrollToHeading(h.index)}>
+                  <button
+                    key={h.id}
+                    className={`rp-outline-item lvl-${h.level}${h.index === activeIdx ? ' active' : ''}`}
+                    onClick={() => { setActiveIdx(h.index); scrollToHeading(h.index); }}
+                  >
                     {h.text}
                   </button>
                 ))}
               </div>
             )
         )}
-
-        {tab === 'related' && <RelatedTab pageId={pageId} onOpenPage={onOpenPage} />}
-
-        {tab === 'info' && page && (
-          <div className="rp-info">
-            <div className="rp-info-row"><span>字数</span><b>{words}</b></div>
-            <div className="rp-info-row"><span>版本</span><b>v{page.contentVersion}</b></div>
-            <div className="rp-info-row"><span>整理状态</span><b>{STATUS_LABEL[page.llmProcessStatus] ?? page.llmProcessStatus}</b></div>
-            {page.updatedAt && <div className="rp-info-row"><span>更新时间</span><b>{new Date(page.updatedAt).toLocaleString()}</b></div>}
-            <button
-              className={`rp-fav${isFavorite(page.id) ? ' on' : ''}`}
-              onClick={() => toggle(page.id)}
-            >
-              <Star size={15} fill={isFavorite(page.id) ? 'currentColor' : 'none'} />
-              {isFavorite(page.id) ? '已收藏' : '收藏这篇笔记'}
-            </button>
-          </div>
-        )}
-
-        {tab === 'ai' && <AiTab workspace={workspace} space={space} pageId={pageId} onOpenPage={onOpenPage} />}
       </div>
     </aside>
   );
 }
 
-/* ------------------------------------------------ related (relationships) --- */
-type GNode = { id: string; type: 'page' | 'topic'; label: string };
-type GEdge = { id: string; source: string; target: string };
-
-function RelatedTab({ pageId, onOpenPage }: { pageId: string; onOpenPage: (id: string) => void }) {
-  const { data, isLoading, isError } = useQuery<{ nodes: GNode[]; edges: GEdge[] }>({
-    queryKey: ['related', pageId],
-    queryFn: () => api(`/api/graph/around-page/${pageId}`)
-  });
-
-  const related = useMemo(() => {
-    if (!data) return [] as GNode[];
-    const connected = new Set<string>();
-    for (const e of data.edges) {
-      if (e.source === pageId) connected.add(e.target);
-      if (e.target === pageId) connected.add(e.source);
-    }
-    return data.nodes.filter((n) => n.id !== pageId && connected.has(n.id));
-  }, [data, pageId]);
-
-  if (isLoading) return <SkeletonList rows={4} />;
-  if (isError || related.length === 0) {
-    return <EmptyState icon={<Link2 size={28} />} title="暂无关联" hint="当这篇笔记与其他内容产生联系时，会显示在这里。" />;
-  }
-  return (
-    <div className="rp-related">
-      {related.map((n) => (
-        <button key={n.id} className="rp-related-item" onClick={() => n.type === 'page' && onOpenPage(n.id)}>
-          <span className={`rp-related-kind ${n.type}`}>{n.type === 'page' ? '笔记' : '主题'}</span>
-          <span className="rp-related-title">{n.label}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/* --------------------------------------------------------------- AI tab ---- */
-type Citation = { title?: string; pageId?: string; chunkId?: string; excerpt?: string };
-const SUGG_LABEL: Record<string, string> = {
-  topic_proposal: '主题提案', cross_link: '关联建议', stale_topic: '主题待更新'
-};
-const RISK_LABEL: Record<string, string> = { low: '低风险', medium: '中风险', high: '高风险' };
+/* ----------------------------------------------------------- summary tab --- */
+type Citation = { title?: string; pageId?: string; chunkId?: string; excerpt?: string; score?: number };
 
 function renderAnswer(text: string, sources: Citation[], onClick: (c: Citation) => void) {
   const parts = text.split(/(\[\d+\])/g);
@@ -161,44 +131,36 @@ function renderAnswer(text: string, sources: Citation[], onClick: (c: Citation) 
   });
 }
 
-function AiTab({ workspace, space, pageId, onOpenPage }: {
+function SummaryTab({ workspace, space, pageId, onOpenPage }: {
   workspace: Workspace; space: Space; pageId: string; onOpenPage: (id: string) => void;
 }) {
-  // 摘要 + 标签
-  const { data: profData, isLoading: profLoading } = useQuery<{ profile: AiProfile | null }>({
+  const toast = useToast();
+
+  const { data: profData, isLoading: profLoading, refetch: refetchProf } = useQuery<{ profile: AiProfile | null }>({
     queryKey: ['ai-profile', pageId], queryFn: () => getAiProfile(pageId)
   });
   const profile = profData?.profile ?? null;
 
-  // 相关页面（复用图谱 around-page）
-  const { data: relData } = useQuery<{ nodes: GNode[]; edges: GEdge[] }>({
-    queryKey: ['related', pageId], queryFn: () => api(`/api/graph/around-page/${pageId}`)
+  const regen = useMutation({
+    mutationFn: () => post(`/api/llm-wiki/pages/${pageId}/process-now`, {}),
+    onSuccess: () => { toast.success('已重新生成摘要'); refetchProf(); },
+    onError: (e) => toast.error(`生成失败：${(e as Error).message}`)
   });
-  const related = useMemo(() => {
-    const data = relData;
-    if (!data) return [] as GNode[];
-    const connected = new Set<string>();
-    for (const e of data.edges) {
-      if (e.source === pageId) connected.add(e.target);
-      if (e.target === pageId) connected.add(e.source);
-    }
-    return data.nodes.filter((n) => n.id !== pageId && connected.has(n.id));
-  }, [relData, pageId]);
 
-  // 主题建议（本页）
+  // 本页建议（风险分级交互）
   const { data: suggData, refetch: refetchSugg } = useQuery<{ suggestions: WikiSuggestion[] }>({
     queryKey: ['page-suggestions', pageId], queryFn: () => getPageSuggestions(pageId)
   });
   const suggestions = suggData?.suggestions ?? [];
   const [recentlyAccepted, setRecentlyAccepted] = useState<{ id: string; label: string }[]>([]);
+  const [highSugg, setHighSugg] = useState<WikiSuggestion | null>(null);
 
   const accept = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/accept`, {}),
     onSuccess: (_r, id) => {
       refetchSugg();
       const s = suggestions.find((x) => x.id === id);
-      const label = s ? (SUGG_LABEL[s.type] ?? s.type) : '建议';
-      setRecentlyAccepted((p) => [...p, { id, label }]);
+      if (s) setRecentlyAccepted((p) => [...p, { id, label: suggestionTitle(s).title }]);
     }
   });
   const ignore = useMutation({
@@ -212,6 +174,22 @@ function AiTab({ workspace, space, pageId, onOpenPage }: {
       refetchSugg();
     }
   });
+
+  // Low-risk (tag) suggestions are applied automatically, but transparently:
+  // each one fires a toast so the user always knows what changed.
+  const autoHandled = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const s of suggestions) {
+      if (s.risk === 'low' && !autoHandled.current.has(s.id)) {
+        autoHandled.current.add(s.id);
+        const label = (s.payload as { topicTitle?: string; targetPageTitle?: string })?.topicTitle
+          ?? (s.payload as { targetPageTitle?: string })?.targetPageTitle
+          ?? (s.type === 'topic_proposal' ? '新主题' : '关联');
+        accept.mutate(s.id);
+        toast.info(`已自动添加标签：${label}`);
+      }
+    }
+  }, [suggestions, accept, toast]);
 
   // 问当前页面（流式 SSE）
   const [q, setQ] = useState('');
@@ -245,73 +223,38 @@ function AiTab({ workspace, space, pageId, onOpenPage }: {
   };
 
   return (
-    <div className="rp-ai">
-      {/* 摘要 + 标签 */}
+    <div className="rp-summary">
       <section className="rp-section">
-        <h4 className="rp-section-title">摘要</h4>
+        <div className="rp-section-head-row">
+          <h4 className="rp-section-title">AI 摘要</h4>
+          <button className="ghost sm" disabled={regen.isPending} onClick={() => regen.mutate()} title="根据当前正文重新生成摘要与标签">
+            <RefreshCw size={13} className={regen.isPending ? 'spin' : ''} /> 重新生成
+          </button>
+        </div>
         {profLoading && <div className="muted small">生成中…</div>}
         {!profLoading && !profile?.summary && <p className="muted small">保存或整理后，AI 会在此生成本页摘要。</p>}
         {profile?.summary && <p className="rp-ai-summary">{profile.summary}</p>}
-        {profile && profile.tags.length > 0 && (
-          <div className="rp-tags">
-            {profile.tags.map((t) => <span key={t} className="tag-chip">{t}</span>)}
-          </div>
-        )}
       </section>
 
-      {/* 相关页面 */}
       <section className="rp-section">
-        <h4 className="rp-section-title">相关页面</h4>
-        {related.length === 0
-          ? <p className="muted small">当本页与其他笔记产生联系时会显示在这里。</p>
-          : (
-            <div className="rp-related">
-              {related.map((n) => (
-                <button key={n.id} className="rp-related-item" onClick={() => n.type === 'page' && onOpenPage(n.id)}>
-                  <span className={`rp-related-kind ${n.type}`}>{n.type === 'page' ? '笔记' : '主题'}</span>
-                  <span className="rp-related-title">{n.label}</span>
-                </button>
-              ))}
-            </div>
-          )}
-      </section>
-
-      {/* 主题建议 */}
-      <section className="rp-section">
-        <h4 className="rp-section-title">主题建议</h4>
+        <h4 className="rp-section-title">本页 AI 建议</h4>
         {suggestions.length === 0 && recentlyAccepted.length === 0 && (
           <p className="muted small">AI 整理本页后，会在此给出可审阅的主题与关联建议。</p>
         )}
-        {suggestions.map((s) => {
-          const p = s.payload as { topicTitle?: string; targetPageTitle?: string; changes?: string; reason?: string };
-          const title = s.type === 'topic_proposal' ? `提议新主题：${p.topicTitle ?? '未命名'}`
-            : s.type === 'cross_link' ? `关联笔记：${p.targetPageTitle ?? '相关页面'}`
-            : s.type === 'stale_topic' ? `主题待更新：${p.topicTitle ?? '某主题'}` : s.type;
-          return (
-            <div className="rp-sugg" key={s.id}>
-              <div className="rp-sugg-head">
-                <span className="tag">{SUGG_LABEL[s.type] ?? s.type}</span>
-                <span className={`risk risk-${s.risk}`}>{RISK_LABEL[s.risk] ?? s.risk}</span>
-                <b>{title}</b>
-              </div>
-              {p.changes && <p className="rp-sugg-changes">将改变：{p.changes}</p>}
-              {p.reason && <p className="muted small">原因：{p.reason}</p>}
-              <div className="rp-sugg-actions">
-                <button className="ghost ok sm" disabled={accept.isPending} onClick={() => accept.mutate(s.id)}><Check size={13} /> 接受</button>
-                <button className="ghost danger sm" disabled={ignore.isPending} onClick={() => ignore.mutate(s.id)}><X size={13} /> 忽略</button>
-              </div>
-            </div>
-          );
-        })}
+        {suggestions.map((s) => (
+          <SuggestionCard
+            key={s.id}
+            s={s}
+            onAccept={(x) => accept.mutate(x.id)}
+            onIgnore={(x) => ignore.mutate(x.id)}
+            onAcceptHigh={(x) => setHighSugg(x)}
+          />
+        ))}
         {recentlyAccepted.map((a) => (
-          <div className="rp-sugg accepted" key={a.id}>
-            <span className="muted small">已接受：{a.label}</span>
-            <button className="ghost sm" disabled={undo.isPending} onClick={() => undo.mutate(a.id)}><RotateCcw size={13} /> 撤销</button>
-          </div>
+          <SuggestionAccepted key={a.id} label={a.label} onUndo={() => undo.mutate(a.id)} />
         ))}
       </section>
 
-      {/* 问当前页面 */}
       <section className="rp-section">
         <h4 className="rp-section-title">问当前页面</h4>
         <p className="muted small">仅基于本篇笔记回答，并标注引用来源。</p>
@@ -342,6 +285,127 @@ function AiTab({ workspace, space, pageId, onOpenPage }: {
           </div>
         )}
       </section>
+
+      {highSugg && (
+        <HighRiskModal
+          suggestion={highSugg}
+          onClose={() => setHighSugg(null)}
+          onConfirm={() => { accept.mutate(highSugg.id); setHighSugg(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- tags tab ---- */
+function TagsTab({ pageId }: { pageId: string }) {
+  const toast = useToast();
+  const { data, isLoading, refetch } = useQuery<{ profile: AiProfile | null }>({
+    queryKey: ['ai-profile', pageId], queryFn: () => getAiProfile(pageId)
+  });
+  const profile = data?.profile ?? null;
+  const [tags, setTags] = useState<string[]>([]);
+  const [userAdded, setUserAdded] = useState<Set<string>>(new Set());
+  const [draft, setDraft] = useState('');
+
+  // Seed local editable copy from the AI profile whenever it (re)loads.
+  useEffect(() => {
+    if (profile) { setTags(profile.tags ?? []); setUserAdded(new Set()); }
+  }, [profile]);
+
+  const save = useMutation({
+    mutationFn: (next: string[]) => updatePageTags(pageId, next),
+    onSuccess: () => { toast.success('标签已保存'); refetch(); },
+    onError: (e) => toast.error(`保存失败：${(e as Error).message}`)
+  });
+
+  const removeTag = (t: string) => {
+    const next = tags.filter((x) => x !== t);
+    setTags(next);
+    setUserAdded((prev) => { const n = new Set(prev); n.delete(t); return n; });
+    save.mutate(next);
+  };
+  const addTag = () => {
+    const t = draft.trim();
+    if (!t || tags.includes(t)) { setDraft(''); return; }
+    const next = [...tags, t];
+    setTags(next);
+    setUserAdded((prev) => new Set(prev).add(t));
+    setDraft('');
+    save.mutate(next);
+  };
+
+  if (isLoading) return <SkeletonList rows={3} />;
+  return (
+    <div className="rp-tags-tab">
+      <section className="rp-section">
+        <h4 className="rp-section-title">标签</h4>
+        <p className="muted small">AI 会自动为笔记打标签；你也可以增删，所有改动都会保存。</p>
+        {tags.length === 0 && <p className="muted small">还没有标签。</p>}
+        <div className="rp-tags">
+          {tags.map((t) => (
+            <span key={t} className={`tag-chip${userAdded.has(t) ? ' user' : ''}`}>
+              {!userAdded.has(t) && <Brain size={11} className="tag-src" />}
+              {userAdded.has(t) && <span className="tag-src you">你</span>}
+              {t}
+              <button className="tag-x" onClick={() => removeTag(t)} aria-label={`删除 ${t}`}><X size={11} /></button>
+            </span>
+          ))}
+        </div>
+        <div className="rp-tag-add">
+          <input value={draft} placeholder="添加标签后回车…" onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addTag(); }} />
+          <button className="ghost sm" onClick={addTag}><Check size={13} /> 添加</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------- related tab ---- */
+type GNode = { id: string; type: 'page' | 'topic'; label: string };
+type GEdge = { id: string; source: string; target: string; confidence?: number };
+
+function RelatedTab({ pageId, onOpenPage }: { pageId: string; onOpenPage: (id: string) => void }) {
+  const { data, isLoading, isError } = useQuery<{ nodes: GNode[]; edges: GEdge[] }>({
+    queryKey: ['related', pageId],
+    queryFn: () => api(`/api/graph/around-page/${pageId}`)
+  });
+
+  const related = useMemo(() => {
+    if (!data) return [] as (GNode & { score: number })[];
+    const connected = new Set<string>();
+    for (const e of data.edges) {
+      if (e.source === pageId) connected.add(e.target);
+      if (e.target === pageId) connected.add(e.source);
+    }
+    return data.nodes
+      .filter((n) => n.id !== pageId && connected.has(n.id))
+      .map((n) => {
+        const confs = data.edges
+          .filter((e) => (e.source === pageId && e.target === n.id) || (e.target === pageId && e.source === n.id))
+          .map((e) => e.confidence ?? 0);
+        return { ...n, score: confs.length ? Math.max(...confs) : 0 };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+  }, [data, pageId]);
+
+  if (isLoading) return <SkeletonList rows={4} />;
+  if (isError || related.length === 0) {
+    return <EmptyState icon={<Link2 size={28} />} title="暂无关联" hint="当这篇笔记与其他内容产生联系时，会显示在这里。" />;
+  }
+  return (
+    <div className="rp-related">
+      {related.map((n) => (
+        <button key={n.id} className="rp-related-item" onClick={() => n.type === 'page' && onOpenPage(n.id)}>
+          <span className={`rp-related-kind ${n.type}`}>{n.type === 'page' ? '笔记' : '主题'}</span>
+          <span className="rp-related-title">{n.label}</span>
+          <span className="rel-bar" title={`相关度 ${Math.round(n.score)}%`}>
+            <span className="rel-fill" style={{ width: `${Math.min(100, Math.max(4, n.score))}%` }} />
+          </span>
+        </button>
+      ))}
     </div>
   );
 }

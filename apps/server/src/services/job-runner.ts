@@ -5,7 +5,9 @@ import { env } from '../env';
 import { createAiProviderForContext, isAiDisabledError, vectorToSqlLiteral, type AiProvider } from './ai.service';
 import * as metrics from './job-metrics';
 import { chunkText, tokenizeChineseFriendly } from '../utils/text';
-import { generateWikiArtifacts, markTopicsStaleForPage, refreshTopicSuggestions } from './wiki.service';
+import { generateWikiArtifacts, markTopicsStaleForPage, refreshTopicSuggestions, buildPageProfile, consolidateCandidates } from './wiki.service';
+import { evaluateLifecycle } from './lifecycle.service';
+import { generateClosurePackage, storeClosurePackage } from './closure.service';
 
 export interface EnqueueInput {
   workspaceId?: string;
@@ -158,24 +160,32 @@ async function processPageLlm(job: any) {
     await db.insert(documentChunks).values(values);
   }
 
-  const summary = page.text_content ? page.text_content.slice(0, 240) : '';
+  // Phase 2 (D3): structured Page Profile (summary + tags + keywords + entities).
+  const profile = buildPageProfile(page.text_content || '', page.title);
   await db.execute(sql`
     INSERT INTO page_ai_profiles(page_id, workspace_id, space_id, summary, tags, keywords, entities, model)
-    VALUES (${page.id}, ${page.workspace_id}, ${page.space_id}, ${summary}, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'mock')
-    ON CONFLICT(page_id) DO UPDATE SET summary = excluded.summary, updated_at = now()
+    VALUES (
+      ${page.id}, ${page.workspace_id}, ${page.space_id}, ${profile.summary},
+      ${JSON.stringify(profile.tags)}::jsonb, ${JSON.stringify(profile.keywords)}::jsonb, ${JSON.stringify(profile.entities)}::jsonb, 'mock'
+    )
+    ON CONFLICT(page_id) DO UPDATE SET
+      summary = excluded.summary, tags = excluded.tags,
+      keywords = excluded.keywords, entities = excluded.entities, updated_at = now()
   `);
 
   await db.execute(sql`UPDATE pages SET llm_process_status = 'processed', llm_processed_at = now() WHERE id = ${page.id}`);
 
   // M5: derive candidate Topics + Suggestions from the processed page. Best
   // effort — never let a wiki-generation failure break the indexing pipeline.
+  // BUT persist the failure on the page so it is visible in the UI (Phase 0
+  // task 6): no silent "success". Cleared on success.
   try {
     await generateWikiArtifacts(page, ai);
+    await db.execute(sql`UPDATE pages SET wiki_error_message = NULL, updated_at = now() WHERE id = ${page.id}`);
   } catch (err) {
-    console.error(
-      `[wiki] artifact generation failed for page ${page.id}:`,
-      err instanceof Error ? err.message : err
-    );
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[wiki] artifact generation failed for page ${page.id}:`, message);
+    await db.execute(sql`UPDATE pages SET wiki_error_message = ${message}, updated_at = now() WHERE id = ${page.id}`);
   }
 
   // M5-stale: a re-processed page may have changed the source material of
@@ -188,6 +198,24 @@ async function processPageLlm(job: any) {
       `[wiki] stale marking failed for page ${page.id}:`,
       err instanceof Error ? err.message : err
     );
+  }
+
+  // Phase 3 (E1): after a page is indexed + artifacted, enqueue a Space
+  // clustering job (deduped per space) that aggregates its candidates into
+  // formal Topics. Lower priority than page jobs so it never starves indexing.
+  try {
+    await enqueueJob({
+      workspaceId: page.workspace_id,
+      spaceId: page.space_id,
+      entityType: 'space',
+      entityId: page.space_id,
+      type: 'space.consolidate_topic_candidates',
+      runAfterSeconds: 0,
+      priority: 200,
+      dedupeKey: `space:${page.space_id}:consolidate`
+    });
+  } catch (err) {
+    console.error(`[wiki] consolidate enqueue failed for space ${page.space_id}:`, err instanceof Error ? err.message : err);
   }
 
   metrics.recordSuccess(job.type);
@@ -221,7 +249,43 @@ export async function runOneJob(workerId = `worker-${process.pid}`): Promise<boo
   metrics.recordProcessed();
   try {
     if (job.type === 'page.process_llm') await processPageLlm(job);
-    else if (job.type === 'topic.refresh_suggestions') await refreshTopicSuggestions(job.entity_id);
+    else if (job.type === 'topic.refresh_suggestions') {
+      // A failed refresh must NOT be reported as success (Phase 0 task 2):
+      // throw so the job is retried / ultimately marked failed, the topic
+      // stays stale, and the stale suggestion remains for the user.
+      const res = await refreshTopicSuggestions(job.entity_id);
+      if (!res.refreshed) throw new Error(res.error ?? 'refresh failed');
+    } else if (job.type === 'space.consolidate_topic_candidates') {
+      // Phase 3 (E2): aggregate the space's candidates into Topics. A disabled
+      // space yields no AI/embedding work — skip and mark succeeded (nothing to do).
+      let ai: AiProvider;
+      try {
+        ai = await createAiProviderForContext({ workspaceId: job.workspace_id ?? '', spaceId: job.space_id ?? '', userId: '' });
+      } catch (err) {
+        if (isAiDisabledError(err)) {
+          await db.execute(sql`UPDATE jobs SET status = 'succeeded', updated_at = now() WHERE id = ${job.id}`);
+          return true;
+        }
+        throw err;
+      }
+      await consolidateCandidates(job.space_id!, ai);
+    } else if (job.type === 'knowledge.evaluate_lifecycle') {
+      // Phase 5 (F4): daily lifecycle evaluation. Generates Suggestions only
+      // (never archives), so failing mid-run is safe to retry.
+      await evaluateLifecycle(job.workspace_id ?? undefined, job.space_id ?? undefined);
+    } else if (job.type === 'project.generate_closure_package') {
+      // Phase 6 (F1): generate a closure package. Suggestions ONLY — it never
+      // moves/derives Topics, so a retry is always safe and idempotent.
+      let ai: AiProvider | undefined;
+      try {
+        ai = await createAiProviderForContext({ workspaceId: job.workspace_id ?? '', spaceId: job.space_id ?? '', userId: '' });
+      } catch (err) {
+        if (isAiDisabledError(err)) ai = undefined;
+        else throw err;
+      }
+      const pkg = await generateClosurePackage(job.space_id!, ai);
+      await storeClosurePackage(job.space_id!, pkg, job.entity_id ?? null);
+    }
     await db.execute(sql`UPDATE jobs SET status = 'succeeded', updated_at = now() WHERE id = ${job.id}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

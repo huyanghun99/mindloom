@@ -34,6 +34,12 @@ export interface HybridSearchResult {
   source: 'bm25' | 'vector' | 'both';
   score: number;
   rank?: number;
+  // Phase 5 (F5): lifecycle-aware metadata attached so the UI can surface a
+  // historical warning when an archived source is cited.
+  lifecycleStatus?: string;
+  archivedAt?: string;
+  spaceName?: string;
+  spaceKind?: string;
 }
 
 export interface KnowledgeEdgeEvidence {

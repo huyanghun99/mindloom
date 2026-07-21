@@ -1,16 +1,20 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  BookOpen, Brain, ChevronDown, Clock, Download, FileText, Home, LayoutGrid,
-  LogOut, Pencil, Plus, Search, Sparkles, Star, Trash2, Wand2
+  BookOpen, Brain, ChevronDown, Clock, Download, FileText, Home, LayoutGrid, LogOut,
+  Moon, Monitor, Pencil, Plus, Search, Settings, Sparkles, Star, Sun, Trash2, Wand2
 } from 'lucide-react';
-import { api, del, patch, post } from '../../api';
+import { api, del, patch, post, renamePage, movePage, copyPage } from '../../api';
 import { useToast } from '../../components/Toast';
 import { useDialog } from '../../components/Dialog';
+import { PageActionMenu, MovePageDialog, type PageAction } from '../../components/PageActionMenu';
+import { ShareModal } from '../../ShareModal';
 import { useFavorites } from '../../hooks/useFavorites';
 import { useAdaptivePolling } from '../../hooks/useAdaptivePolling';
 import { PageTree } from '../notes/PageTree';
-import type { MainRoute, Space, TreeNode, User, Workspace } from '../../types';
+import { useDeletePage } from '../notes/useDeletePage';
+import { cycleTheme, getTheme, type ThemeMode } from '../../theme';
+import type { MainRoute, PageDetail, Space, TreeNode, User, Workspace } from '../../types';
 
 const STATUS_LABEL: Record<string, string> = {
   pending: '待整理', processing: '整理中', done: '已整理', processed: '已整理',
@@ -26,7 +30,7 @@ function flatten(tree: TreeNode[]): TreeNode[] {
 
 export function LeftSidebar({
   me, workspace, workspaces, space, spaces, route, selectedPageId,
-  onPickWorkspace, onPickSpace, onSelectPage, onNavigate, onNewNote, onLogout
+  onPickWorkspace, onPickSpace, onSelectPage, onNavigate, onNewNote, onLogout, onNavigateHome, onOpenSettings
 }: {
   me: User;
   workspace: Workspace | null;
@@ -35,17 +39,21 @@ export function LeftSidebar({
   spaces: Space[];
   route: MainRoute;
   selectedPageId: string | null;
-  onPickWorkspace: (w: Workspace | null) => void;
-  onPickSpace: (s: Space | null) => void;
+  onPickWorkspace: (w: Workspace) => void;
+  onPickSpace: (s: Space) => void;
   onSelectPage: (id: string) => void;
   onNavigate: (r: MainRoute) => void;
   onNewNote: () => void;
   onLogout: () => void;
+  onNavigateHome: () => void;
+  onOpenSettings: () => void;
 }) {
   const qc = useQueryClient();
   const toast = useToast();
   const dialog = useDialog();
   const { favorites } = useFavorites();
+  const [theme, setTheme] = useState<ThemeMode>(() => getTheme());
+  const onToggleTheme = () => setTheme(cycleTheme(theme));
 
   const [wsOpen, setWsOpen] = useState(false);
   const [wsName, setWsName] = useState('');
@@ -76,7 +84,7 @@ export function LeftSidebar({
   /* ---- workspace / space CRUD (no native confirm) ---- */
   const createWs = useMutation({
     mutationFn: () => post<{ workspace: Workspace }>('/api/workspaces', { name: wsName || '我的知识库' }),
-    onSuccess: async (r) => { setWsName(''); setWsOpen(false); await qc.invalidateQueries({ queryKey: ['workspaces'] }); onPickWorkspace(r.workspace); onPickSpace(null); toast.success('已创建知识库'); }
+    onSuccess: async (r) => { setWsName(''); setWsOpen(false); await qc.invalidateQueries({ queryKey: ['workspaces'] }); onPickWorkspace(r.workspace); toast.success('已创建知识库'); }
   });
   const renameWs = useMutation({
     mutationFn: (name: string) => patch(`/api/workspaces/${workspace!.id}`, { name }),
@@ -84,7 +92,7 @@ export function LeftSidebar({
   });
   const deleteWs = useMutation({
     mutationFn: () => del(`/api/workspaces/${workspace!.id}`),
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey: ['workspaces'] }); onPickWorkspace(null); onPickSpace(null); toast.success('已删除知识库'); }
+    onSuccess: async () => { await qc.invalidateQueries({ queryKey: ['workspaces'] }); onNavigateHome(); toast.success('已删除知识库'); }
   });
   const createSp = useMutation({
     mutationFn: () => post<{ space: Space }>('/api/spaces', { workspaceId: workspace!.id, name: spName || '新空间', aiPrivacyPolicy: 'inherit_workspace' }),
@@ -98,7 +106,11 @@ export function LeftSidebar({
     mutationFn: (id: string) => del(`/api/spaces/${id}`),
     onSuccess: async (_r, id) => {
       await qc.invalidateQueries({ queryKey: ['spaces', workspace!.id] });
-      if (space?.id === id) onPickSpace(spaces.find((s) => s.id !== id) ?? null);
+      const remaining = spaces.find((s) => s.id !== id);
+      if (space?.id === id) {
+        if (remaining) onPickSpace(remaining);
+        else onNavigateHome();
+      }
       toast.success('已删除空间');
     }
   });
@@ -136,6 +148,80 @@ export function LeftSidebar({
     } catch (e) { toast.error(`导出失败：${(e as Error).message}`); }
   };
 
+  /* ---- page operation menu / drag reorder (Phase 6) ---- */
+  const [menu, setMenu] = useState<{ page: TreeNode; x: number; y: number } | null>(null);
+  const [moveTarget, setMoveTarget] = useState<TreeNode | null>(null);
+  const [shareTarget, setShareTarget] = useState<TreeNode | null>(null);
+  const deletePage = useDeletePage(space, (id) => { if (id === selectedPageId) onSelectPage(''); });
+
+  const findNode = useCallback((id: string): TreeNode | undefined => {
+    let found: TreeNode | undefined;
+    const walk = (ns: TreeNode[]) => { for (const n of ns) { if (n.id === id) found = n; walk(n.children); } };
+    walk(tree);
+    return found;
+  }, [tree]);
+
+  const downloadMarkdown = (markdown: string, filename: string) => {
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePageAction = useCallback(async (action: PageAction, page: TreeNode) => {
+    if (!space) return;
+    if (action === 'rename') {
+      const next = await dialog.prompt({ title: '重命名页面', defaultValue: page.title, placeholder: '输入新标题', confirmText: '保存' });
+      if (next && next.trim() && next.trim() !== page.title) {
+        try {
+          await renamePage(page.id, next.trim());
+          await qc.invalidateQueries({ queryKey: ['page-tree', space.id] });
+          toast.success('已重命名');
+        } catch (e) { toast.error(`重命名失败：${(e as Error).message}`); }
+      }
+    } else if (action === 'move') {
+      setMoveTarget(page);
+    } else if (action === 'copy') {
+      try {
+        const { page: src } = await api<{ page: PageDetail }>(`/api/pages/${page.id}`);
+        const res = await copyPage({ spaceId: space.id, title: `${src.title || '未命名笔记'} 副本`, contentJson: src.contentJson, textContent: src.textContent });
+        await qc.invalidateQueries({ queryKey: ['page-tree', space.id] });
+        toast.success('已复制页面');
+        onSelectPage(res.page.id);
+      } catch (e) { toast.error(`复制失败：${(e as Error).message}`); }
+    } else if (action === 'share') {
+      setShareTarget(page);
+    } else if (action === 'export') {
+      try {
+        const res = await post<{ markdown: string; title: string }>(`/api/export/page/${page.id}`, {});
+        downloadMarkdown(res.markdown, `${res.title || 'note'}.md`);
+      } catch (e) { toast.error(`导出失败：${(e as Error).message}`); }
+    } else if (action === 'delete') {
+      const ok = await dialog.confirm({ title: `删除「${page.title || '未命名笔记'}」？`, message: '删除后可在提示中撤销。', confirmText: '删除', danger: true });
+      if (ok) deletePage({ id: page.id, title: page.title });
+    }
+  }, [space, dialog, qc, toast, onSelectPage, deletePage]);
+
+  const onReorder = useCallback((dragId: string, targetId: string | null, position: number) => {
+    if (!space) return;
+    const target = targetId ? findNode(targetId) : null;
+    const parentPageId = target ? target.parentPageId : null;
+    movePage(dragId, { parentPageId, position })
+      .then(() => qc.invalidateQueries({ queryKey: ['page-tree', space.id] }))
+      .catch((e: Error) => toast.error(`移动失败：${e.message}`));
+  }, [space, findNode, movePage, qc, toast]);
+
+  const onMoveTarget = useCallback((parentPageId: string | null) => {
+    if (!moveTarget || !space) return;
+    // Append to the end of the target parent's list.
+    movePage(moveTarget.id, { parentPageId, position: 1e9 })
+      .then(() => qc.invalidateQueries({ queryKey: ['page-tree', space.id] }))
+      .then(() => toast.success('已移动'))
+      .catch((e: Error) => toast.error(`移动失败：${e.message}`))
+      .finally(() => setMoveTarget(null));
+  }, [moveTarget, space, movePage, qc, toast]);
+
   const NAV: { key: MainRoute; label: string; icon: React.ReactNode; badge?: number }[] = [
     { key: 'home', label: '首页', icon: <Home size={16} /> },
     { key: 'organize', label: '智能整理', icon: <Wand2 size={16} />, badge: inboxCount },
@@ -160,7 +246,7 @@ export function LeftSidebar({
               <div className="sb-menu">
                 {workspaces.map((w) => (
                   <button key={w.id} className={`sb-menu-item${workspace?.id === w.id ? ' active' : ''}`}
-                    onClick={() => { onPickWorkspace(w); onPickSpace(null); setWsOpen(false); }}>
+                    onClick={() => { onPickWorkspace(w); setWsOpen(false); }}>
                     <BookOpen size={14} /> {w.name}
                   </button>
                 ))}
@@ -259,6 +345,9 @@ export function LeftSidebar({
                   selectedId={route === 'page' ? selectedPageId : null}
                   onSelect={onSelectPage}
                   statusLabel={(s) => STATUS_LABEL[s] ?? s}
+                  onContextMenu={(node, x, y) => setMenu({ page: node, x, y })}
+                  onMore={(node, x, y) => setMenu({ page: node, x, y })}
+                  onReorder={onReorder}
                 />
               </div>
             )}
@@ -268,8 +357,39 @@ export function LeftSidebar({
 
       <div className="sb-foot">
         <span className="sb-user">{me.name}{me.isInstanceOwner && <span className="tag">Owner</span>}</span>
+        <button className="icon-btn" title={theme === 'dark' ? '深色模式' : theme === 'light' ? '浅色模式' : '跟随系统'} onClick={onToggleTheme}>
+          {theme === 'dark' ? <Moon size={15} /> : theme === 'light' ? <Sun size={15} /> : <Monitor size={15} />}
+        </button>
+        <button className="icon-btn" title="设置" onClick={onOpenSettings}><Settings size={15} /></button>
         <button className="icon-btn" title="退出登录" onClick={onLogout}><LogOut size={15} /></button>
       </div>
+
+      {menu && (
+        <PageActionMenu
+          page={menu.page}
+          x={menu.x}
+          y={menu.y}
+          onAction={handlePageAction}
+          onClose={() => setMenu(null)}
+        />
+      )}
+      {moveTarget && (
+        <MovePageDialog
+          page={moveTarget}
+          tree={tree}
+          onClose={() => setMoveTarget(null)}
+          onMove={onMoveTarget}
+        />
+      )}
+      {shareTarget && (
+        <ShareModal
+          workspaceId={workspace!.id}
+          targetType="page"
+          targetId={shareTarget.id}
+          targetTitle={shareTarget.title}
+          onClose={() => setShareTarget(null)}
+        />
+      )}
     </aside>
   );
 }

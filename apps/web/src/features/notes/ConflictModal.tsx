@@ -21,6 +21,7 @@ export function ConflictModal({
   serverText,
   onKeepMine,
   onUseTheirs,
+  onSaveCopy,
   onCancel
 }: {
   serverVersion: number;
@@ -30,6 +31,7 @@ export function ConflictModal({
   serverText?: string;
   onKeepMine: () => void;
   onUseTheirs: () => void;
+  onSaveCopy: () => void;
   onCancel: () => void;
 }) {
   return (
@@ -38,9 +40,9 @@ export function ConflictModal({
         <div className="conflict-head">
           <GitMerge size={18} />
           <div>
-            <h3 className="dialog-title">这篇笔记已在别处更新</h3>
+            <h3 className="dialog-title">有人修改了此页面</h3>
             <p className="dialog-message">
-              服务器当前版本为 v{serverVersion}。你可以保留本地的未保存修改，或恢复为服务器版本。本地草稿不会因刷新而丢失。
+              服务器当前版本为 v{serverVersion}。你可以用本地修改覆盖，查看并切换到最新版，或把本地修改另存为一篇新笔记的副本。本地草稿不会因刷新而丢失。
             </p>
           </div>
           <button className="modal-close" onClick={onCancel} aria-label="关闭"><X size={16} /></button>
@@ -61,8 +63,9 @@ export function ConflictModal({
 
         <div className="dialog-actions">
           <button className="ghost" onClick={onCancel}>稍后处理</button>
-          <button className="ghost" onClick={onUseTheirs}>使用服务器版本</button>
-          <button className="primary" onClick={onKeepMine}>用我的版本覆盖</button>
+          <button className="ghost" onClick={onSaveCopy}>另存副本</button>
+          <button className="ghost" onClick={onUseTheirs}>查看最新版</button>
+          <button className="primary" onClick={onKeepMine}>覆盖</button>
         </div>
       </div>
     </div>

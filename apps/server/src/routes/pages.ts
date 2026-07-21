@@ -84,6 +84,38 @@ pageRoutes.get('/:pageId/ai-profile', async (c) => {
   return c.json({ profile: { summary, tags: [], keywords: [] } });
 });
 
+// Phase 4: let the user manage (add / remove) tags on a page's AI profile.
+// This is a plain CRUD on the tags column — not an AI generation feature —
+// so the user stays in control of their own labels without "secret" edits.
+pageRoutes.patch('/:pageId/ai-profile', async (c) => {
+  const user = c.get('user');
+  const pageId = c.req.param('pageId');
+  if (!(await canEditPage(user.id, pageId))) return c.json({ error: 'Forbidden' }, 403);
+  const body = await c.req.json<{ tags?: unknown }>().catch(() => ({}) as { tags?: unknown });
+  if (!Array.isArray(body.tags)) return c.json({ error: 'tags must be an array' }, 400);
+  const tags = (body.tags as unknown[])
+    .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+    .map((t) => t.trim())
+    .slice(0, 50);
+  const [page] = await db.select({ workspaceId: pages.workspaceId, spaceId: pages.spaceId })
+    .from(pages).where(eq(pages.id, pageId)).limit(1);
+  if (!page) return c.json({ error: 'Not found' }, 404);
+  await db.insert(pageAiProfiles)
+    .values({ pageId, workspaceId: page.workspaceId, spaceId: page.spaceId, tags })
+    .onConflictDoUpdate({ target: pageAiProfiles.pageId, set: { tags, updatedAt: sql`now()` } });
+  return c.json({ ok: true, tags });
+});
+
+// Phase 4: dismiss a page from the LLM inbox (mark it as not-to-be-processed)
+// without deleting it. Used by the "全部忽略" bulk action in the Review Center.
+pageRoutes.post('/:pageId/skip-llm', async (c) => {
+  const user = c.get('user');
+  const pageId = c.req.param('pageId');
+  if (!(await canEditPage(user.id, pageId))) return c.json({ error: 'Forbidden' }, 403);
+  await db.update(pages).set({ llmProcessStatus: 'ignored', updatedAt: sql`now()` }).where(eq(pages.id, pageId));
+  return c.json({ ok: true });
+});
+
 // Pending AI suggestions that concern this specific page (right-panel "主题建议").
 pageRoutes.get('/:pageId/suggestions', async (c) => {
   const user = c.get('user');

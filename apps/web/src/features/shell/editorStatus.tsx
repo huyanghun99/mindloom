@@ -8,7 +8,7 @@ import { createContext, useContext, useMemo, useState } from 'react';
  * top bar. Rather than lifting the whole editor into App, the editor publishes
  * a small status object here and the top bar consumes it.
  */
-export type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+export type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error' | 'conflict';
 
 export interface EditorStatus {
   hasPage: boolean;

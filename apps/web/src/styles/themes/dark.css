@@ -1,0 +1,78 @@
+/* ============================================================
+   Dark theme — overrides color tokens only.
+   Activated by <html data-theme="dark"> (manual) or by the
+   prefers-color-scheme media query below when no explicit choice
+   is set (data-theme="light" opts out of auto-dark).
+   ============================================================ */
+
+:root[data-theme="dark"] {
+  --bg: #0f1115;
+  --surface: #171a21;
+  --surface-2: #1f232c;
+  --surface-3: #2a2f3a;
+  --text: #e7eaf0;
+  --text-2: #aab2c2;
+  --muted: #7c8698;
+  --primary: #818cf8;
+  --primary-hover: #a5b0ff;
+  --primary-soft: #232547;
+  --border: #262b36;
+  --border-strong: #363c49;
+  --danger: #f87171;
+  --success: #4ade80;
+  --ok: var(--success);
+  --warn: #fbbf24;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, .45);
+  --shadow-pop: 0 10px 34px rgba(0, 0, 0, .55);
+  --shadow: 0 1px 3px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .45);
+}
+
+/* Auto-dark when the user hasn't picked a side explicitly. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --bg: #0f1115;
+    --surface: #171a21;
+    --surface-2: #1f232c;
+    --surface-3: #2a2f3a;
+    --text: #e7eaf0;
+    --text-2: #aab2c2;
+    --muted: #7c8698;
+    --primary: #818cf8;
+    --primary-hover: #a5b0ff;
+    --primary-soft: #232547;
+    --border: #262b36;
+    --border-strong: #363c49;
+    --danger: #f87171;
+    --success: #4ade80;
+    --ok: var(--success);
+    --warn: #fbbf24;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, .45);
+    --shadow-pop: 0 10px 34px rgba(0, 0, 0, .55);
+    --shadow: 0 1px 3px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .45);
+  }
+}
+
+/* A few hardcoded light-tint hovers that would look harsh on dark. */
+:root[data-theme="dark"] .fav-toggle.on:hover,
+:root[data-theme="dark"] .more-item.danger:hover,
+:root[data-theme="dark"] .ml-block-del:hover,
+:root[data-theme="dark"] .sb-item-row .icon-btn.danger:hover,
+:root[data-theme="dark"] .ss-item-row .icon-btn.danger:hover {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+
+:root[data-theme="dark"] .auth-screen {
+  background: radial-gradient(1200px 600px at 50% -10%, var(--primary-soft), var(--bg));
+}
+
+/* Scrollbar tint for dark surfaces. */
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+}
+:root[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}

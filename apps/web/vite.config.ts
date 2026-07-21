@@ -1,28 +1,34 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { createRequire } from 'node:module';
+import path from 'node:path';
+import fs from 'node:fs';
 
 const require = createRequire(import.meta.url);
 
 // Excalidraw 0.18.x ships its stylesheet through a *conditional* export
 // (`development` / `production`) with no `default` fallback. Vite's CSS
 // subpath resolver does not match those conditions, so the bare import
-// `@excalidraw/excalidraw/index.css` fails to resolve. We map it to the
-// concrete dist file (dev vs prod) so the editor styles load reliably.
-function resolveExcalidrawCss(command: 'build' | 'serve'): string | undefined {
+// `@excalidraw/excalidraw/index.css` fails to resolve ("Does the file
+// exist?"). We map that subpath to the concrete dist file so the editor
+// styles load reliably in both dev and build.
+function resolveExcalidrawCss(): string | undefined {
   try {
     const entry = require.resolve('@excalidraw/excalidraw');
-    return entry.replace(
-      /dist\/(?:prod|dev)\/index\.js$/,
-      `dist/${command === 'build' ? 'prod' : 'dev'}/index.css`
-    );
+    const distDir = entry.replace(/dist\/(?:prod|dev)\/index\.js$/, 'dist');
+    // Prefer dev, fall back to prod — works regardless of build vs serve.
+    for (const variant of ['dev', 'prod']) {
+      const cssPath = path.join(distDir, variant, 'index.css');
+      if (fs.existsSync(cssPath)) return cssPath;
+    }
   } catch {
-    return undefined;
+    /* package not installed — nothing to alias */
   }
+  return undefined;
 }
 
-export default defineConfig(({ command }) => {
-  const excalidrawCss = resolveExcalidrawCss(command);
+export default defineConfig(() => {
+  const excalidrawCss = resolveExcalidrawCss();
   const alias: Record<string, string> = excalidrawCss
     ? { '@excalidraw/excalidraw/index.css': excalidrawCss }
     : {};

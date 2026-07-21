@@ -1,15 +1,15 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Info, X, AlertTriangle } from 'lucide-react';
+import { CheckCircle2, Info, X, AlertTriangle, XCircle } from 'lucide-react';
 
 /**
- * Unified toast + undo system (Phase 3).
+ * Unified toast + undo system (Phase 3, extended Phase 6 with `warning`).
  *
  * Replaces ad-hoc feedback and native alert() with a consistent, dismissible
  * notification surface. A toast may carry a single action button — the primary
  * use is an "撤销" (undo) affordance so destructive operations always feel
  * reversible.
  */
-export type ToastKind = 'success' | 'error' | 'info';
+export type ToastKind = 'success' | 'error' | 'info' | 'warning';
 
 export interface ToastAction {
   label: string;
@@ -34,6 +34,7 @@ interface ToastApi {
   success: (message: string, opts?: ToastOptions) => number;
   error: (message: string, opts?: ToastOptions) => number;
   info: (message: string, opts?: ToastOptions) => number;
+  warning: (message: string, opts?: ToastOptions) => number;
   dismiss: (id: number) => void;
 }
 
@@ -47,8 +48,9 @@ export function useToast(): ToastApi {
 
 const ICONS: Record<ToastKind, React.ReactNode> = {
   success: <CheckCircle2 size={17} />,
-  error: <AlertTriangle size={17} />,
-  info: <Info size={17} />
+  error: <XCircle size={17} />,
+  info: <Info size={17} />,
+  warning: <AlertTriangle size={17} />
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -76,6 +78,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     success: (m, o) => show('success', m, o),
     error: (m, o) => show('error', m, o),
     info: (m, o) => show('info', m, o),
+    warning: (m, o) => show('warning', m, o),
     dismiss
   }), [show, dismiss]);
 

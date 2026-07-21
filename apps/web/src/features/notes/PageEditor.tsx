@@ -13,6 +13,7 @@ import { useToast } from '../../components/Toast';
 import { useDialog } from '../../components/Dialog';
 import { useFavorites } from '../../hooks/useFavorites';
 import { useEditorStatus, type SaveState } from '../shell/editorStatus';
+import { SaveIndicator } from '../shell/SaveIndicator';
 import { useDeletePage } from './useDeletePage';
 import { loadDraft, saveDraft, clearDraft, draftEquals, type LocalDraft } from '../../editor/draft';
 import { consumePendingScroll, scrollEditorToText } from '../../editor/scrollTo';
@@ -204,7 +205,7 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     autosaveTimer.current = setTimeout(() => {
       if (!savingRef.current) autoSave.mutate();
-    }, 1200);
+    }, 2000);
     return () => { if (autosaveTimer.current) clearTimeout(autosaveTimer.current); };
   }, [dirty, title, doc, page?.id, autoSave]);
 
@@ -288,9 +289,29 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
     setConflict(null);
   }, [conflict, syncFromServer]);
 
+  const saveCopy = useCallback(async () => {
+    try {
+      const res = await post<{ page: PageDetail }>('/api/pages', {
+        spaceId: space.id,
+        title: `${titleRef.current || '未命名笔记'}（副本）`,
+        contentJson: docRef.current,
+        textContent: extractText(docRef.current)
+      });
+      if (pageRef.current) clearDraft(pageRef.current.id);
+      await qc.invalidateQueries({ queryKey: ['page-tree', space.id] });
+      toast.success('已另存为副本');
+      setConflict(null);
+      onSelectPage(res.page.id);
+    } catch (e) {
+      toast.error(`另存失败：${(e as Error).message}`);
+    }
+  }, [space.id, qc, toast, onSelectPage]);
+
   // Publish save state + actions to the top bar.
   const saving = manualSave.isPending || autoSave.isPending;
-  const saveState: SaveState = manualSave.isError || autoSave.isError
+  const saveState: SaveState = conflict
+    ? 'conflict'
+    : manualSave.isError || autoSave.isError
     ? 'error'
     : saving ? 'saving' : dirty ? 'dirty' : page ? 'saved' : 'idle';
   useEffect(() => {
@@ -333,6 +354,8 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
         <span className="meta">
           v{page.contentVersion} · {STATUS_LABEL[page.llmProcessStatus] ?? page.llmProcessStatus}
         </span>
+        <span className="head-spacer" />
+        <SaveIndicator state={saveState} />
         <button
           className={`fav-toggle${fav ? ' on' : ''}`}
           title={fav ? '取消收藏' : '收藏'}
@@ -347,8 +370,15 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
       <input
         className="title-input"
         value={title}
-        placeholder="无标题"
+        placeholder="无标题（可用 emoji 前缀，如 📝 会议记录）"
         onChange={(e) => { setTitle(e.target.value); setDirty(true); }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const pm = document.querySelector('.editor-content .ProseMirror') as HTMLElement | null;
+            pm?.focus();
+          }
+        }}
       />
       <RichEditor
         key={`${page.id}:${ek}`}
@@ -357,6 +387,7 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
         spaceId={space.id}
         pageId={page.id}
         onChange={({ contentJson }) => { setDoc(contentJson); setDirty(true); }}
+        onSave={() => manualSave.mutate()}
       />
 
       {conflict && (
@@ -368,6 +399,7 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
           serverText={conflict.serverText}
           onKeepMine={keepMine}
           onUseTheirs={useTheirs}
+          onSaveCopy={saveCopy}
           onCancel={() => setConflict(null)}
         />
       )}

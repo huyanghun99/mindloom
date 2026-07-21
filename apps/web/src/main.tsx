@@ -5,8 +5,11 @@ import { App } from './App';
 import { ToastProvider } from './components/Toast';
 import { DialogProvider } from './components/Dialog';
 import { EditorStatusProvider } from './features/shell/editorStatus';
+import { initTheme } from './theme';
 import 'katex/dist/katex.min.css';
 import './styles.css';
+
+initTheme();
 
 const client = new QueryClient();
 createRoot(document.getElementById('root')!).render(

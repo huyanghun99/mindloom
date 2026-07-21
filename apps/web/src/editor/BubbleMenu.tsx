@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { type Editor } from '@tiptap/react';
 import {
   Bold, Italic, Underline as UnderlineIcon, Strikethrough, Code, Highlighter,
-  Link as LinkIcon, Check
+  Link as LinkIcon, Check, Sparkles, ChevronDown
 } from 'lucide-react';
+import { AI_ACTIONS, BUBBLE_AI_ACTIONS, type AiActionKind } from './ai-actions';
 
 const PRESET_COLORS = ['#1a2233', '#dc2626', '#ea580c', '#d97706', '#16a34a', '#0891b2'];
 
@@ -14,39 +15,54 @@ const NON_TEXT = new Set([
   'audio', 'pdf', 'file', 'mathBlock', 'mathInline', 'callout', 'toggle'
 ]);
 
+const SHOW_DELAY = 200;
+
 /**
- * Bubble Menu (Phase4 — task 3).
+ * Bubble Menu (Phase 3 — task 4).
  *
- * Appears only while a range of *text* is selected (never on a single
- * collapsed cursor, never over an advanced block that has its own UI). Provides
- * the core inline formatting plus a link editor. All actions use
+ * Appears ~200ms after a *text* range is selected (delay avoids flicker on
+ * transient selections). Positioned centered above the selection. Provides
+ * inline formatting, a link editor, text colors and AI actions
+ * (polish / translate / summarize / explain). All actions use
  * onMouseDown + preventDefault so the editor selection is preserved.
  */
-export function BubbleMenu({ editor }: { editor: Editor }) {
+export function BubbleMenu({
+  editor,
+  onAi
+}: {
+  editor: Editor;
+  onAi?: (kind: AiActionKind, text: string, anchor: { top: number; left: number }) => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [show, setShow] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
   const [linkOpen, setLinkOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
   const [linkUrl, setLinkUrl] = useState('');
   const [active, setActive] = useState({ bold: false, italic: false, underline: false, strike: false, code: false, highlight: false, link: false });
+
+  const clearTimer = () => { if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; } };
 
   const update = useCallback(() => {
     const { from, to, empty } = editor.state.selection;
     if (empty) {
+      clearTimer();
       setShow(false);
+      setLinkOpen(false);
+      setAiOpen(false);
       return;
     }
     const node = editor.state.doc.nodeAt(from);
     if (node && NON_TEXT.has(node.type.name)) {
+      clearTimer();
       setShow(false);
       return;
     }
     try {
       const start = editor.view.coordsAtPos(from);
       const end = editor.view.coordsAtPos(to);
-      const el = ref.current;
-      if (!el) return;
-      el.style.top = `${Math.min(start.top, end.top)}px`;
-      el.style.left = `${(start.left + end.left) / 2}px`;
+      setPos({ top: Math.min(start.top, end.top), left: (start.left + end.left) / 2 });
       setActive({
         bold: editor.isActive('bold'),
         italic: editor.isActive('italic'),
@@ -56,11 +72,14 @@ export function BubbleMenu({ editor }: { editor: Editor }) {
         highlight: editor.isActive('highlight'),
         link: editor.isActive('link')
       });
-      setShow(true);
+      if (!show) {
+        clearTimer();
+        timerRef.current = setTimeout(() => setShow(true), SHOW_DELAY);
+      }
     } catch {
       setShow(false);
     }
-  }, [editor]);
+  }, [editor, show]);
 
   useEffect(() => {
     editor.on('selectionUpdate', update);
@@ -68,14 +87,28 @@ export function BubbleMenu({ editor }: { editor: Editor }) {
     return () => {
       editor.off('selectionUpdate', update);
       editor.off('transaction', update);
+      clearTimer();
     };
   }, [editor, update]);
 
   useEffect(() => {
-    const hide = () => setShow(false);
+    const hide = () => { clearTimer(); setShow(false); };
     window.addEventListener('scroll', hide, true);
     return () => window.removeEventListener('scroll', hide, true);
   }, []);
+
+  // Mod-k (with a selection) opens the link editor via a custom event.
+  const openLink = useCallback(() => {
+    setLinkUrl(editor.getAttributes('link').href ?? '');
+    setLinkOpen(true);
+    if (!show) setShow(true);
+  }, [editor, show]);
+  useEffect(() => {
+    const dom = editor.view.dom as HTMLElement;
+    const handler = () => openLink();
+    dom.addEventListener('mindloom:edit-link', handler);
+    return () => dom.removeEventListener('mindloom:edit-link', handler);
+  }, [editor, openLink]);
 
   if (!show) return null;
 
@@ -83,17 +116,22 @@ export function BubbleMenu({ editor }: { editor: Editor }) {
 
   const applyLink = () => {
     const url = linkUrl.trim();
-    if (!url) {
-      editor.chain().focus().extendMarkRange('link').unsetLink().run();
-    } else {
-      editor.chain().focus().extendMarkRange('link').setLink({ href: url }).run();
-    }
+    if (!url) editor.chain().focus().extendMarkRange('link').unsetLink().run();
+    else editor.chain().focus().extendMarkRange('link').setLink({ href: url }).run();
     setLinkOpen(false);
     setLinkUrl('');
   };
 
+  const runAi = (kind: AiActionKind) => {
+    const { from, to } = editor.state.selection;
+    const text = editor.state.doc.textBetween(from, to, '\n', ' ').trim();
+    setAiOpen(false);
+    setShow(false);
+    if (text && onAi) onAi(kind, text, pos);
+  };
+
   return (
-    <div ref={ref} className="bubble-menu" style={{ display: 'flex' }}>
+    <div ref={ref} className="bubble-menu" style={{ display: 'flex', top: pos.top, left: pos.left }}>
       <button type="button" className={`bub-btn${active.bold ? ' active' : ''}`} title="加粗" onMouseDown={stop} onClick={() => editor.chain().focus().toggleBold().run()}><Bold size={15} /></button>
       <button type="button" className={`bub-btn${active.italic ? ' active' : ''}`} title="斜体" onMouseDown={stop} onClick={() => editor.chain().focus().toggleItalic().run()}><Italic size={15} /></button>
       <button type="button" className={`bub-btn${active.underline ? ' active' : ''}`} title="下划线" onMouseDown={stop} onClick={() => editor.chain().focus().toggleUnderline().run()}><UnderlineIcon size={15} /></button>
@@ -105,7 +143,22 @@ export function BubbleMenu({ editor }: { editor: Editor }) {
         <button key={c} type="button" className="bub-swatch" style={{ background: c }} title="文字颜色" onMouseDown={stop} onClick={() => editor.chain().focus().setColor(c).run()} />
       ))}
       <span className="bub-sep" />
-      <button type="button" className={`bub-btn${active.link ? ' active' : ''}`} title="链接" onMouseDown={stop} onClick={() => { setLinkUrl(editor.getAttributes('link').href ?? ''); setLinkOpen((o) => !o); }}><LinkIcon size={15} /></button>
+      <button type="button" className={`bub-btn${active.link ? ' active' : ''}`} title="链接" onMouseDown={stop} onClick={() => { setLinkUrl(editor.getAttributes('link').href ?? ''); setLinkOpen((o) => !o); setAiOpen(false); }}><LinkIcon size={15} /></button>
+      {onAi && (
+        <button type="button" className={`bub-btn bub-ai${aiOpen ? ' active' : ''}`} title="AI 操作" onMouseDown={stop} onClick={() => { setAiOpen((o) => !o); setLinkOpen(false); }}>
+          <Sparkles size={15} /> <ChevronDown size={11} />
+        </button>
+      )}
+
+      {aiOpen && onAi && (
+        <div className="bub-ai-menu" onMouseDown={(e) => e.preventDefault()}>
+          {BUBBLE_AI_ACTIONS.map((k) => (
+            <button key={k} type="button" className="bub-ai-item" onClick={() => runAi(k)}>
+              <span className="bub-ai-icon">{AI_ACTIONS[k].icon}</span> {AI_ACTIONS[k].label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {linkOpen && (
         <div className="bub-link-bar" onMouseDown={(e) => e.stopPropagation()}>

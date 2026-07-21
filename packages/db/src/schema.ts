@@ -25,6 +25,17 @@ export const jobStatusEnum = pgEnum('job_status', ['pending', 'running', 'succee
 export const aiPrivacyEnum = pgEnum('space_ai_privacy_policy', ['inherit_workspace', 'cloud_allowed', 'local_only', 'disabled']);
 export const aiConfigScopeEnum = pgEnum('ai_config_scope', ['workspace', 'user']);
 
+// Phase 1 — Space semantics (D1)
+export const spaceKindEnum = pgEnum('space_kind', ['project', 'area', 'resource', 'inbox']);
+export const spaceLifecycleStatusEnum = pgEnum('space_lifecycle_status', ['active', 'on_hold', 'completed', 'archived']);
+
+// Phase 1 — Topic three-dimension status (D4). The legacy single `status`
+// column is preserved for one release cycle; these three orthogonal axes
+// replace its overloaded meaning (publication / freshness / lifecycle).
+export const topicPublicationStatusEnum = pgEnum('topic_publication_status', ['suggested', 'draft', 'accepted', 'user_edited']);
+export const topicFreshnessStatusEnum = pgEnum('topic_freshness_status', ['fresh', 'stale', 'refresh_failed']);
+export const topicLifecycleStatusEnum = pgEnum('topic_lifecycle_status', ['active', 'cooling', 'dormant', 'archived']);
+
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
   email: text('email').notNull().unique(),
@@ -86,6 +97,14 @@ export const spaces = pgTable('spaces', {
   aiPrivacyPolicy: aiPrivacyEnum('ai_privacy_policy').notNull().default('inherit_workspace'),
   autoLlmProcessing: boolean('auto_llm_processing').notNull().default(true),
   updatePolicy: text('update_policy').notNull().default('balanced'),
+  // Phase 1 (D1): Space kind + lifecycle semantics.
+  spaceKind: spaceKindEnum('space_kind').notNull().default('area'),
+  lifecycleStatus: spaceLifecycleStatusEnum('lifecycle_status').notNull().default('active'),
+  startedAt: timestamp('started_at', { withTimezone: true }),
+  targetEndAt: timestamp('target_end_at', { withTimezone: true }),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
+  archivePolicy: jsonb('archive_policy').$type<{ mode: 'manual' | 'suggest' | 'auto'; inactiveDays: number; completedGraceDays: number }>().notNull().default({ mode: 'manual', inactiveDays: 180, completedGraceDays: 30 }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
 }, (t) => ({
@@ -118,6 +137,7 @@ export const pages = pgTable('pages', {
   llmProcessStatus: llmProcessStatusEnum('llm_process_status').notNull().default('pending'),
   llmDirtyReason: text('llm_dirty_reason'),
   llmProcessedAt: timestamp('llm_processed_at', { withTimezone: true }),
+  wikiErrorMessage: text('wiki_error_message'),
   createdById: uuid('created_by_id').notNull().references(() => users.id),
   updatedById: uuid('updated_by_id').notNull().references(() => users.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -188,15 +208,76 @@ export const wikiTopics = pgTable('wiki_topics', {
   userEditedAt: timestamp('user_edited_at', { withTimezone: true }),
   lastAiRefreshAt: timestamp('last_ai_refresh_at', { withTimezone: true }),
   updatePolicy: text('update_policy').notNull().default('suggest_only'),
+  // Phase 1 (D4): three orthogonal status axes replacing the overloaded `status`.
+  publicationStatus: topicPublicationStatusEnum('publication_status').notNull().default('suggested'),
+  freshnessStatus: topicFreshnessStatusEnum('freshness_status').notNull().default('fresh'),
+  lifecycleStatus: topicLifecycleStatusEnum('lifecycle_status').notNull().default('active'),
+  lastMeaningfulActivityAt: timestamp('last_meaningful_activity_at', { withTimezone: true }),
+  inactiveSince: timestamp('inactive_since', { withTimezone: true }),
+  archiveCandidateAt: timestamp('archive_candidate_at', { withTimezone: true }),
+  archivedAt: timestamp('archived_at', { withTimezone: true }),
+  archivedById: uuid('archived_by_id').references(() => users.id),
+  archiveReason: text('archive_reason'),
+  pinned: boolean('pinned').notNull().default(false),
+  keepActiveUntil: timestamp('keep_active_until', { withTimezone: true }),
+  promotedFromTopicId: uuid('promoted_from_topic_id'),
+  originSpaceId: uuid('origin_space_id').references(() => spaces.id, { onDelete: 'set null' }),
+  // Phase 3 (D3): TopicSynthesis support. Aliases + normalized title power the
+  // clustering job's alias / synonym matching; synthesisVersion pins the schema.
+  aliases: text('aliases').array().notNull().default([]),
+  normalizedTitle: text('normalized_title'),
+  synthesisVersion: text('synthesis_version').notNull().default('topic-synthesis-v1'),
+  // Phase 4: merge redirect. When a topic is merged into another, it becomes a
+  // redirect stub (lifecycle 'archived') pointing at the surviving topic. This
+  // keeps old links working and makes the merge traceable / reversible.
+  // NOTE: the FK to wiki_topics(id) is created in migration 0011 via raw SQL to
+  // avoid a self-reference cycle in the Drizzle type inference.
+  mergedIntoTopicId: uuid('merged_into_topic_id'),
+  mergedAt: timestamp('merged_at', { withTimezone: true }),
+  mergedById: uuid('merged_by_id').references(() => users.id),
   createdById: uuid('created_by_id').references(() => users.id),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
 }, (t) => ({ scopeIdx: index('idx_topics_scope_status').on(t.workspaceId, t.spaceId, t.status) }));
 
+// Phase 2 (D2): Candidate ↔ Topic decoupling. A processed page produces
+// *candidates* (each tied to a supporting chunk), NOT formal wiki_topics.
+// Formal Topics are created later by promotion / Phase 3 clustering, so a
+// single short page never spawns multiple published Topics.
+export const topicCandidates = pgTable('topic_candidates', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  spaceId: uuid('space_id').notNull().references(() => spaces.id, { onDelete: 'cascade' }),
+  pageId: uuid('page_id').notNull().references(() => pages.id, { onDelete: 'cascade' }),
+  // Candidate references the chunk that supports it (gate: "Candidate 有 Chunk 引用").
+  chunkId: uuid('chunk_id').references(() => documentChunks.id, { onDelete: 'set null' }),
+  title: text('title').notNull(),
+  summary: text('summary').notNull().default(''),
+  // Structured Page Profile snapshot for this candidate (summary/tags/keywords/entities).
+  profile: jsonb('profile').$type<Record<string, unknown>>().notNull().default({}),
+  status: text('status').notNull().default('candidate').$type<'candidate' | 'promoted' | 'dismissed'>(),
+  promotedTopicId: uuid('promoted_topic_id').references(() => wikiTopics.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+}, (t) => ({
+  scopeIdx: index('idx_candidates_scope').on(t.workspaceId, t.spaceId),
+  pageIdx: index('idx_candidates_page').on(t.pageId),
+  chunkIdx: index('idx_candidates_chunk').on(t.chunkId),
+  statusIdx: index('idx_candidates_status').on(t.status)
+}));
+
 export const topicSources = pgTable('topic_sources', {
   topicId: uuid('topic_id').notNull().references(() => wikiTopics.id, { onDelete: 'cascade' }),
   pageId: uuid('page_id').notNull().references(() => pages.id, { onDelete: 'cascade' }),
   chunkId: uuid('chunk_id').references(() => documentChunks.id, { onDelete: 'set null' }),
+  // Phase 3 (D5): Chunk-level provenance. All new columns are nullable / have
+  // defaults so existing `{ topicId, pageId, chunkId }` inserts keep working.
+  sourceContentVersion: integer('source_content_version'),
+  sourceType: text('source_type').notNull().default('page'),
+  relevanceScore: integer('relevance_score'),
+  evidenceExcerpt: text('evidence_excerpt'),
+  addedBy: text('added_by').notNull().default('ai'),
+  contributionType: text('contribution_type'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 }, (t) => ({ pk: primaryKey({ columns: [t.topicId, t.pageId] }) }));
 
@@ -373,6 +454,112 @@ export const backups = pgTable('backups', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp('completed_at', { withTimezone: true })
 });
+
+// Phase 4: audit ledger for reversible high-risk Topic operations (merge / split).
+// Every entry records enough state to undo the operation (the exact rows moved,
+// the pre-operation status), so that merges / splits are always recoverable.
+// `undone_at` is set (and `undone_by_id`) when the operation is reverted.
+export const topicOperations = pgTable('topic_operations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  spaceId: uuid('space_id').notNull().references(() => spaces.id, { onDelete: 'cascade' }),
+  // Phase 6 (F2): 'derive' is a user-confirmed copy of a Topic into another
+  // Space (preserving promotedFromTopicId / originSpaceId on the copy). The
+  // original Topic is never moved or deleted, so its history stays intact.
+  operationType: text('operation_type').notNull().$type<'merge' | 'split' | 'derive'>(),
+  // For merge: the topic that was folded INTO the survivor. For split: the
+  // original (parent) topic that was divided.
+  topicId: uuid('topic_id').references(() => wikiTopics.id, { onDelete: 'cascade' }),
+  // For merge: the surviving topic. For split: the newly created topic.
+  targetTopicId: uuid('target_topic_id').references(() => wikiTopics.id, { onDelete: 'set null' }),
+  // Operation-specific reversal data (moved chunk ids, moved source keys,
+  // previous statuses, extracted keyPoint ids, ...). Deterministic, never LLM.
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull().default({}),
+  createdById: uuid('created_by_id').references(() => users.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  undoneAt: timestamp('undone_at', { withTimezone: true }),
+  undoneById: uuid('undone_by_id').references(() => users.id)
+}, (t) => ({
+  scopeIdx: index('idx_topic_ops_scope').on(t.workspaceId, t.spaceId),
+  topicIdx: index('idx_topic_ops_topic').on(t.topicId)
+}));
+
+// Phase 5 (F3): activity events — the immutable log of *real* user activity.
+// Background jobs (indexing, AI summaries, scheduled lifecycle evaluation,
+// polling) MUST NEVER write here (spec F3: "不计入活动"). Only genuine user
+// actions (edit, open/view, search click, RAG final citation, citation open,
+// added to topic source, referenced by active project) are recorded.
+export const activityEntityTypeEnum = pgEnum('activity_entity_type', ['topic', 'page']);
+export const activityEventTypeEnum = pgEnum('activity_event_type', [
+  'edit',
+  'view',
+  'search_click',
+  'rag_citation',
+  'citation_open',
+  'added_to_source',
+  'project_reference'
+]);
+
+export const knowledgeActivityEvents = pgTable('knowledge_activity_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  spaceId: uuid('space_id').notNull().references(() => spaces.id, { onDelete: 'cascade' }),
+  entityType: activityEntityTypeEnum('entity_type').notNull(),
+  entityId: uuid('entity_id').notNull(),
+  eventType: activityEventTypeEnum('event_type').notNull(),
+  userId: uuid('user_id').references(() => users.id),
+  occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull().defaultNow(),
+  metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+}, (t) => ({
+  scopeIdx: index('idx_activity_scope').on(t.workspaceId, t.spaceId),
+  entityIdx: index('idx_activity_entity').on(t.entityType, t.entityId),
+  occurredIdx: index('idx_activity_occurred').on(t.occurredAt)
+}));
+
+// Phase 5 (F3): rolled-up activity statistics. Recomputed from the event log on
+// every recorded event (so the 30-day windows are always exact), plus the
+// latest "last*At" timestamps and a deterministic activityScore.
+export const knowledgeActivityStats = pgTable('knowledge_activity_stats', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  spaceId: uuid('space_id').notNull().references(() => spaces.id, { onDelete: 'cascade' }),
+  entityType: activityEntityTypeEnum('entity_type').notNull(),
+  entityId: uuid('entity_id').notNull(),
+  lastEditedAt: timestamp('last_edited_at', { withTimezone: true }),
+  lastViewedAt: timestamp('last_viewed_at', { withTimezone: true }),
+  lastRetrievedAt: timestamp('last_retrieved_at', { withTimezone: true }),
+  lastLinkedAt: timestamp('last_linked_at', { withTimezone: true }),
+  lastMeaningfulActivityAt: timestamp('last_meaningful_activity_at', { withTimezone: true }),
+  views30d: integer('views_30d').notNull().default(0),
+  citations30d: integer('citations_30d').notNull().default(0),
+  ragCitations30d: integer('rag_citations_30d').notNull().default(0),
+  activeUsers30d: integer('active_users_30d').notNull().default(0),
+  activityScore: integer('activity_score').notNull().default(0),
+  calculatedAt: timestamp('calculated_at', { withTimezone: true }).notNull().defaultNow()
+}, (t) => ({
+  entityUnique: uniqueIndex('uidx_activity_stats_entity').on(t.entityType, t.entityId),
+  scopeIdx: index('idx_activity_stats_scope').on(t.workspaceId, t.spaceId)
+}));
+
+// Phase 6 (F1/F2): project closure packages. Generated by the closure job / the
+// "archive wizard" — AI *suggestions only*, never auto-applied. Stores the
+// structured, citation-backed closure summary (goals/results, key decisions +
+// rationale, lessons, tech debt, reusable-knowledge candidates, recommended
+// promotions). The actual promotion (Topic derivation / move) is a separate,
+// user-confirmed action recorded in `topic_operations`.
+export const projectClosurePackages = pgTable('project_closure_packages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+  spaceId: uuid('space_id').notNull().references(() => spaces.id, { onDelete: 'cascade' }),
+  generatedById: uuid('generated_by_id').references(() => users.id),
+  // The structured closure package (project-closure-v1) with real citations.
+  payload: jsonb('payload').$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+}, (t) => ({
+  spaceIdx: uniqueIndex('uidx_closure_space').on(t.spaceId)
+}));
 
 export const userRelations = relations(users, ({ many }) => ({
   workspaceMembers: many(workspaceMembers)

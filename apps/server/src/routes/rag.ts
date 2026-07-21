@@ -8,6 +8,7 @@ import { askRag, streamRag } from '../services/rag.service';
 import { isAiDisabledError, createAiProviderForContext } from '../services/ai.service';
 import { db } from '../db/client';
 import { ragSessions } from '@mindloom/db';
+import { recordActivity } from '../services/activity.service';
 
 export const ragRoutes = new Hono<AppEnv>();
 ragRoutes.use('*', authMiddleware);
@@ -25,6 +26,14 @@ ragRoutes.post('/ask', rateLimitMiddleware('rag.ask'), zValidator('json', ragAsk
     workspaceId: input.workspaceId, spaceId: input.spaceId ?? null, userId: user.id,
     query: input.query, answer: answer.answer, citations: answer.citations
   }).returning();
+  // Phase 5 (F3): a RAG answer that finally cites a Topic is genuine activity.
+  if (input.spaceId) {
+    for (const cit of answer.citations) {
+      if (cit.topicId) {
+        await recordActivity({ workspaceId: input.workspaceId, spaceId: input.spaceId, entityType: 'topic', entityId: cit.topicId, eventType: 'rag_citation', userId: user.id }).catch(() => {});
+      }
+    }
+  }
   return c.json({ ...answer, sessionId: session.id });
 });
 

@@ -7,7 +7,8 @@ import { tokenizeChineseFriendly } from '../utils/text';
 
 interface RankedRow {
   id: string;
-  page_id: string;
+  page_id: string | null;
+  topic_id: string | null;
   space_id: string;
   title: string;
   content: string;
@@ -47,7 +48,8 @@ function rrfFuse(bm25: RankedRow[], vector: RankedRow[], limit: number): HybridS
     const row = bm25[i];
     map.set(row.id, {
       id: row.id,
-      pageId: row.page_id,
+      pageId: row.page_id ?? '',
+      topicId: row.topic_id ?? undefined,
       spaceId: row.space_id,
       title: row.title,
       content: row.content,
@@ -66,7 +68,8 @@ function rrfFuse(bm25: RankedRow[], vector: RankedRow[], limit: number): HybridS
     } else {
       map.set(row.id, {
         id: row.id,
-        pageId: row.page_id,
+        pageId: row.page_id ?? '',
+        topicId: row.topic_id ?? undefined,
         spaceId: row.space_id,
         title: row.title,
         content: row.content,
@@ -93,6 +96,8 @@ export async function hybridSearch(params: {
   mode?: 'keyword' | 'vector' | 'hybrid';
   /** When set, restrict results to chunks of this single page. */
   pageId?: string;
+  /** Phase 5 (F5): `current` down-weights archived; `historical` raises it. */
+  intent?: 'current' | 'historical';
 }): Promise<HybridSearchResult[]> {
   const mode = params.mode ?? 'hybrid';
   const readable = params.spaceId ? [params.spaceId] : await getReadableSpaceIds(params.userId, params.workspaceId);
@@ -105,7 +110,7 @@ export async function hybridSearch(params: {
 
   const bm25Promise: Promise<{ rows: RankedRow[] }> = useKeyword
     ? db.execute<RankedRow>(sql`
-      SELECT id, page_id, space_id, title, content,
+      SELECT id, page_id, topic_id, space_id, title, content,
              ts_rank(to_tsvector('simple', fts_tokens), plainto_tsquery('simple', ${ftsQuery})) AS score
       FROM document_chunks
       WHERE workspace_id = ${params.workspaceId}
@@ -131,7 +136,7 @@ export async function hybridSearch(params: {
           if (!embedding) return { rows: [] };
           const vectorLiteral = vectorToSqlLiteral(embedding);
           return db.execute<RankedRow>(sql`
-            SELECT id, page_id, space_id, title, content,
+            SELECT id, page_id, topic_id, space_id, title, content,
                    1 - (embedding <=> ${vectorLiteral}::vector) AS score
             FROM document_chunks
             WHERE workspace_id = ${params.workspaceId}
@@ -152,5 +157,86 @@ export async function hybridSearch(params: {
   const bm25Rows = bm25Res.status === 'fulfilled' ? bm25Res.value.rows : [];
   const vectorRows = vectorRes.status === 'fulfilled' ? vectorRes.value.rows : [];
   const fused = rrfFuse(bm25Rows, vectorRows, params.limit);
-  return fused.map((r) => ({ ...r, excerpt: buildExcerpt(r.content) }));
+  const ranked = await applyLifecycleRanking(fused, params.spaceId, params.intent ?? 'current');
+  return ranked.map((r) => ({ ...r, excerpt: buildExcerpt(r.content) }));
+}
+
+/**
+ * Phase 5 (F5) — lifecycle-aware re-ranking. Archived knowledge is NEVER excluded
+ * (spec rule 10), but it is down-weighted under the default `current` intent and
+ * boosted under the `historical` intent. The active current Space gets a small
+ * boost; completed (not-yet-archived) Projects are slightly demoted. Each result
+ * is annotated with lifecycle metadata so the UI can show a historical warning
+ * when an archived source is cited.
+ */
+const ACTIVE_CURRENT_BOOST = 1.1;
+const COMPLETED_PROJECT_MULT = 0.9;
+const ARCHIVED_CURRENT_MULT = 0.3;
+const ARCHIVED_HISTORICAL_MULT = 1.3;
+const NONARCHIVED_HISTORICAL_MULT = 0.9;
+
+async function applyLifecycleRanking(
+  results: HybridSearchResult[],
+  currentSpaceId: string | undefined,
+  intent: 'current' | 'historical'
+): Promise<HybridSearchResult[]> {
+  if (results.length === 0) return results;
+  const topicIds = [...new Set(results.filter((r) => r.topicId).map((r) => r.topicId!))];
+  const spaceIds = [...new Set(results.map((r) => r.spaceId))];
+
+  const topicMap = new Map<string, { lifecycleStatus: string; spaceId: string; archivedAt: string | null; mergedInto: string | null }>();
+  if (topicIds.length) {
+    const rows = await db.execute<any>(sql`
+      SELECT id, lifecycle_status, space_id, archived_at, merged_into_topic_id
+      FROM wiki_topics
+      WHERE id = ANY(ARRAY[${sql.join(topicIds.map((id) => sql`${id}::uuid`), sql`, `)}])
+    `);
+    for (const r of rows.rows) {
+      topicMap.set(r.id, {
+        lifecycleStatus: r.lifecycle_status,
+        spaceId: r.space_id,
+        archivedAt: r.archived_at ?? null,
+        mergedInto: r.merged_into_topic_id ?? null
+      });
+    }
+  }
+
+  const spaceMap = new Map<string, { spaceKind: string; lifecycleStatus: string; name: string }>();
+  if (spaceIds.length) {
+    const rows = await db.execute<any>(sql`
+      SELECT id, space_kind, lifecycle_status, name FROM spaces
+      WHERE id = ANY(ARRAY[${sql.join(spaceIds.map((id) => sql`${id}::uuid`), sql`, `)}])
+    `);
+    for (const r of rows.rows) {
+      spaceMap.set(r.id, { spaceKind: r.space_kind, lifecycleStatus: r.lifecycle_status, name: r.name });
+    }
+  }
+
+  const out = results.map((r) => {
+    const topic = r.topicId ? topicMap.get(r.topicId) : null;
+    const space = spaceMap.get(r.spaceId);
+    const isArchived = !!topic && (topic.lifecycleStatus === 'archived' || topic.mergedInto);
+
+    let multiplier = 1;
+    if (isArchived) {
+      multiplier = intent === 'historical' ? ARCHIVED_HISTORICAL_MULT : ARCHIVED_CURRENT_MULT;
+    } else if (intent === 'historical') {
+      multiplier = NONARCHIVED_HISTORICAL_MULT;
+    } else if (currentSpaceId && r.spaceId === currentSpaceId) {
+      multiplier = ACTIVE_CURRENT_BOOST;
+    } else if (space?.spaceKind === 'project' && space.lifecycleStatus === 'completed') {
+      multiplier = COMPLETED_PROJECT_MULT;
+    }
+
+    return {
+      ...r,
+      score: r.score * multiplier,
+      lifecycleStatus: topic?.lifecycleStatus ?? space?.lifecycleStatus ?? undefined,
+      archivedAt: isArchived ? topic?.archivedAt ?? undefined : undefined,
+      spaceName: space?.name ?? undefined,
+      spaceKind: space?.spaceKind ?? undefined
+    };
+  });
+
+  return out.sort((a, b) => b.score - a.score);
 }

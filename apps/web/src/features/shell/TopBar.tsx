@@ -1,31 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  Check, ChevronRight, Cloud, CloudOff, Download, Loader2, MoreHorizontal,
+  Check, ChevronRight, Download, Loader2, MoreHorizontal,
   Printer, Search, Share2, Trash2, Upload
 } from 'lucide-react';
-import { useEditorStatus, type SaveState } from './editorStatus';
+import { useEditorStatus } from './editorStatus';
+import { SaveIndicator } from './SaveIndicator';
+import { urls } from '../../nav';
 import type { MainRoute, Space, Workspace } from '../../types';
 
 const ROUTE_LABEL: Record<MainRoute, string> = {
   home: '首页', page: '', organize: '智能整理', search: '搜索', ask: '知识问答', map: '关系图'
 };
 
-function SaveIndicator({ state }: { state: SaveState }) {
-  if (state === 'saving') return <span className="save-ind"><Loader2 className="spin" size={14} /> 保存中…</span>;
-  if (state === 'dirty') return <span className="save-ind dirty"><Cloud size={14} /> 未保存</span>;
-  if (state === 'error') return <span className="save-ind err"><CloudOff size={14} /> 保存失败</span>;
-  if (state === 'saved') return <span className="save-ind ok"><Check size={14} /> 已保存</span>;
-  return null;
-}
-
-export function TopBar({ workspace, space, route, pageTitle, onOpenPalette, onNavigateHome }: {
+export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalette }: {
   workspace: Workspace | null;
   space: Space | null;
   route: MainRoute;
-  pageTitle: string | null;
+  pageId: string | null;
+  pageTitle?: string | null;
   onOpenPalette: () => void;
-  onNavigateHome: () => void;
 }) {
+  const navigate = useNavigate();
   const { status } = useEditorStatus();
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
@@ -39,14 +35,40 @@ export function TopBar({ workspace, space, route, pageTitle, onOpenPalette, onNa
     return () => window.removeEventListener('mousedown', onClick);
   }, [moreOpen]);
 
-  const crumbTail = route === 'page' ? (status.pageTitle || pageTitle || '未命名笔记') : ROUTE_LABEL[route];
+  const goSpaceHome = () => {
+    if (workspace && space) navigate(urls.spaceHome(workspace.id, space.id));
+    else navigate(urls.home());
+  };
+
+  const crumbTail = route === 'page' ? (pageTitle || status.pageTitle || '未命名笔记') : ROUTE_LABEL[route];
 
   return (
     <header className="topbar">
       <div className="crumbs">
-        <button className="crumb-link" onClick={onNavigateHome}>{workspace?.name ?? '知识库'}</button>
-        {space && <><ChevronRight size={13} className="crumb-sep" /><span className="crumb-mid">{space.name}</span></>}
-        {crumbTail && <><ChevronRight size={13} className="crumb-sep" /><span className="crumb-current">{crumbTail}</span></>}
+        {/* Workspace — clickable */}
+        <button className="crumb-link" onClick={goSpaceHome}>{workspace?.name ?? '知识库'}</button>
+
+        {/* Space — clickable */}
+        {space && (
+          <>
+            <ChevronRight size={13} className="crumb-sep" />
+            <button className="crumb-link" onClick={goSpaceHome}>{space.name}</button>
+          </>
+        )}
+
+        {/* Page (or route) — clickable when on a page */}
+        {crumbTail && (
+          <>
+            <ChevronRight size={13} className="crumb-sep" />
+            {route === 'page' && pageId ? (
+              <button className="crumb-link crumb-current" onClick={() => navigate(urls.page(pageId))}>
+                {crumbTail}
+              </button>
+            ) : (
+              <span className="crumb-current">{crumbTail}</span>
+            )}
+          </>
+        )}
       </div>
 
       <button className="palette-trigger" onClick={onOpenPalette}>

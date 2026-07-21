@@ -1,0 +1,67 @@
+/* ============================================================
+   Design tokens — single source of visual truth.
+   Light theme defaults live here; themes/dark.css overrides colors.
+   ============================================================ */
+
+:root {
+  /* ------- Color ------- */
+  --bg: #f7f8fb;
+  --surface: #ffffff;
+  --surface-2: #f3f5f9;
+  --surface-3: #eaeef5;
+  --text: #1a2233;
+  --text-2: #5b6577;
+  --muted: #8a93a5;
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-soft: #eef0fe;
+  --border: #e6e9f0;
+  --border-strong: #d3dae6;
+  --danger: #dc2626;
+  --success: #16a34a;
+  --ok: var(--success);
+  --warn: #d97706;
+
+  /* ------- Spacing (4px steps) ------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+
+  /* ------- Font sizes ------- */
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 17px;
+  --text-xl: 21px;
+  --text-2xl: 26px;
+
+  /* ------- Radius ------- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius: 12px;          /* legacy alias */
+  --radius-xl: 18px;       /* legacy alias */
+
+  /* ------- Shadow ------- */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, .05);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, .08);
+  --shadow-pop: 0 8px 30px rgba(16, 24, 40, .14);
+  --shadow: 0 1px 3px rgba(16, 24, 40, .06), 0 10px 30px rgba(16, 24, 40, .07);
+
+  /* ------- Motion ------- */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 120ms;
+  --duration-normal: 200ms;
+
+  /* ------- Fonts ------- */
+  --font-sans: Inter, "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  font-family: var(--font-sans);
+  color: var(--text);
+}

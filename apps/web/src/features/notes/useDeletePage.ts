@@ -13,12 +13,13 @@ import type { Space, TreeNode } from '../../types';
  * restored from the server. This gives a fully reversible delete without any
  * new backend endpoint.
  */
-export function useDeletePage(space: Space, onAfterDelete?: (id: string) => void) {
+export function useDeletePage(space: Space | null, onAfterDelete?: (id: string) => void) {
   const qc = useQueryClient();
   const toast = useToast();
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   return useCallback((page: { id: string; title: string }) => {
+    if (!space) return;
     const key = ['page-tree', space.id];
     const snapshot = qc.getQueryData<{ tree: TreeNode[] }>(key);
 
@@ -56,5 +57,5 @@ export function useDeletePage(space: Space, onAfterDelete?: (id: string) => void
         }
       }
     });
-  }, [qc, toast, space.id, onAfterDelete]);
+  }, [qc, toast, space?.id, onAfterDelete]);
 }
