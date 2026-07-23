@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pool } from './client';
+import { logger } from '../services/logger';
 
 const MIGRATIONS_DIR = join(process.cwd(), 'src/db/migrations');
 
@@ -31,7 +32,7 @@ export async function runMigrations(): Promise<string[]> {
         await client.query('INSERT INTO schema_migrations(filename) VALUES ($1)', [file]);
         await client.query('COMMIT');
         applied.push(file);
-        console.log(`Applied migration: ${file}`);
+        logger.info('applied migration', { file });
       } catch (err) {
         await client.query('ROLLBACK');
         throw new Error(`Migration ${file} failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -45,14 +46,14 @@ export async function runMigrations(): Promise<string[]> {
 
 async function main() {
   const applied = await runMigrations();
-  console.log(`Migrations complete. ${applied.length} applied, ${applied.length === 0 ? 'all already up to date' : applied.join(', ')}`);
+  logger.info('migrations complete', { count: applied.length, files: applied });
   await pool.end();
 }
 
 // Run when invoked directly, not when imported (e.g. by tests).
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch(async (err) => {
-    console.error(err);
+    logger.error('migration failed', { err: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
     await pool.end();
     process.exit(1);
   });

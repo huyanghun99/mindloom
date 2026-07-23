@@ -8,6 +8,7 @@ import { chunkText, tokenizeChineseFriendly } from '../utils/text';
 import { generateWikiArtifacts, markTopicsStaleForPage, refreshTopicSuggestions, buildPageProfile, consolidateCandidates } from './wiki.service';
 import { evaluateLifecycle } from './lifecycle.service';
 import { generateClosurePackage, storeClosurePackage } from './closure.service';
+import { logger } from './logger';
 
 export interface EnqueueInput {
   workspaceId?: string;
@@ -125,16 +126,16 @@ async function processPageLlm(job: any) {
   try {
     embeddings = await ai.embedBatch(chunks);
   } catch (err) {
-    console.error(
-      `[index] batch embedding failed for page ${page.id}, falling back to per-chunk:`,
-      err instanceof Error ? err.message : err
-    );
+    logger.warn('batch embedding failed, falling back to per-chunk', {
+      pageId: page.id,
+      err: err instanceof Error ? err.message : String(err)
+    });
     embeddings = await Promise.all(
       chunks.map(async (c): Promise<number[] | null> => {
         try {
           return await ai.embed(c);
         } catch (e) {
-          console.error(`[index] embedding failed for chunk:`, e instanceof Error ? e.message : e);
+          logger.warn('embedding failed for chunk', { err: e instanceof Error ? e.message : String(e) });
           return null;
         }
       })
@@ -189,7 +190,7 @@ async function processPageLlm(job: any) {
     await db.execute(sql`UPDATE pages SET wiki_error_message = NULL, updated_at = now() WHERE id = ${page.id}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[wiki] artifact generation failed for page ${page.id}:`, message);
+    logger.error('wiki artifact generation failed', { pageId: page.id, err: message });
     await db.execute(sql`UPDATE pages SET wiki_error_message = ${message}, updated_at = now() WHERE id = ${page.id}`);
   }
 
@@ -199,10 +200,10 @@ async function processPageLlm(job: any) {
   try {
     await markTopicsStaleForPage(page.id);
   } catch (err) {
-    console.error(
-      `[wiki] stale marking failed for page ${page.id}:`,
-      err instanceof Error ? err.message : err
-    );
+    logger.warn('wiki stale marking failed', {
+      pageId: page.id,
+      err: err instanceof Error ? err.message : String(err)
+    });
   }
 
   // Phase 3 (E1): after a page is indexed + artifacted, enqueue a Space
@@ -220,7 +221,26 @@ async function processPageLlm(job: any) {
       dedupeKey: `space:${page.space_id}:consolidate`
     });
   } catch (err) {
-    console.error(`[wiki] consolidate enqueue failed for space ${page.space_id}:`, err instanceof Error ? err.message : err);
+    logger.warn('consolidate enqueue failed', {
+      spaceId: page.space_id,
+      err: err instanceof Error ? err.message : String(err)
+    });
+  }
+
+  // Phase H (N2): persist AI token usage if the provider reported it. We
+  // capture the *last* generateText usage seen during this page's processing
+  // (wiki artifacts / profile / stale marking). It is an approximation, not a
+  // full ledger — but enough to spot cost anomalies and feed the metrics
+  // endpoint without changing the AiProvider contract.
+  const usage = typeof (ai as AiProvider).getLastUsage === 'function' ? (ai as AiProvider).getLastUsage?.() : null;
+  if (usage) {
+    await db.execute(sql`
+      UPDATE jobs
+      SET actual_prompt_tokens = ${usage.promptTokens},
+          actual_completion_tokens = ${usage.completionTokens},
+          updated_at = now()
+      WHERE id = ${job.id}
+    `);
   }
 
   metrics.recordSuccess(job.type);
@@ -275,10 +295,27 @@ export async function runOneJob(workerId = `worker-${process.pid}`): Promise<boo
       }
       await consolidateCandidates(job.space_id!, ai, async (p) => {
         // Phase B (B1.3): surface clustering progress on the job for the UI to poll.
+        // Phase G (S3): also refresh locked_at as a heartbeat so a long-running
+        // clustering pass is NOT mistaken for a zombie and reset to pending
+        // (which previously live-locked with the 5-minute reaper: reaped ->
+        // re-enqueued -> reaped again, never finishing). A genuinely stuck pass
+        // stops heartbeating and is still reaped, which is the desired behaviour
+        // now that provider calls are bounded by a timeout (S2).
         await db.execute(
-          sql`UPDATE jobs SET progress = ${JSON.stringify(p)}::jsonb, updated_at = now() WHERE id = ${job.id}`
+          sql`UPDATE jobs SET progress = ${JSON.stringify(p)}::jsonb, locked_at = now(), updated_at = now() WHERE id = ${job.id}`
         );
       });
+    } else if (job.type === 'system.cleanup_rate_limits') {
+      // Phase H (N3): trim api_rate_limit_events older than 7 days so the
+      // table does not grow unbounded (the cleanup index already exists).
+      // Idempotent + safe to retry: a failed run simply leaves older rows
+      // until the next day's enqueue.
+      const res = await db.execute(sql`
+        DELETE FROM api_rate_limit_events
+        WHERE created_at < now() - interval '7 days'
+        RETURNING id
+      `);
+      logger.info('rate_limit cleanup done', { deleted: res.rows.length });
     } else if (job.type === 'knowledge.evaluate_lifecycle') {
       // Phase 5 (F4): daily lifecycle evaluation. Generates Suggestions only
       // (never archives), so failing mid-run is safe to retry.
@@ -336,20 +373,50 @@ export function startJobRunner(): void {
   // Recover any jobs left "running" by a previous (crashed) process.
   void recoverZombieJobs()
     .then((n) => {
-      if (n > 0) console.log(`[job-runner] recovered ${n} zombie job(s)`);
+      if (n > 0) logger.info('zombie jobs recovered', { count: n });
     })
-    .catch((err) => console.error('[job-runner] zombie recovery failed', err instanceof Error ? err.message : err));
+    .catch((err) => logger.error('zombie recovery failed', { err: err instanceof Error ? err.message : String(err) }));
+
+  // Phase H (N3): self-schedule the daily rate_limit_events cleanup. The job
+  // is deduped by `system:cleanup_rate_limits` so a restart never enqueues a
+  // second one while the first is still pending/running.
+  void enqueueCleanupRateLimits().catch((err) =>
+    logger.warn('failed to enqueue rate_limit cleanup', { err: err instanceof Error ? err.message : String(err) })
+  );
 
   timer = setInterval(() => {
     const job = runOneJob();
     runningJob = job;
     void job
-      .catch((err) => console.error('job runner error', err))
+      .catch((err) => logger.error('job runner error', { err: err instanceof Error ? err.message : String(err) }))
       .finally(() => {
         runningJob = null;
       });
   }, 3000);
   timer.unref();
+}
+
+/**
+ * Phase H (N3): enqueue the daily rate_limit_events cleanup job. Deduped by a
+ * fixed dedupeKey so at most one pending/running instance exists at a time;
+ * restarts are safe. Runs immediately if never queued, otherwise the job's
+ * runAfter is updated to +24h on each completion (the worker does not yet
+ * re-enqueue on success, so we rely on the daily server restart cycle of a
+ * single-process deployment; for long-running processes a cron-style
+ * re-enqueue should be added here later).
+ */
+async function enqueueCleanupRateLimits(): Promise<void> {
+  await db.execute(sql`
+    WITH existing AS (
+      SELECT id FROM jobs
+      WHERE dedupe_key = 'system:cleanup_rate_limits'
+        AND status IN ('pending', 'running')
+      LIMIT 1
+    )
+    INSERT INTO jobs (entity_type, type, status, priority, dedupe_key, run_after, payload)
+    SELECT 'system', 'system.cleanup_rate_limits', 'pending', 300, 'system:cleanup_rate_limits', now(), '{}'::jsonb
+    WHERE NOT EXISTS (SELECT 1 FROM existing)
+  `);
 }
 
 /** Stop the poll loop and wait (bounded) for an in-flight job to finish. */

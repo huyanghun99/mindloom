@@ -40,6 +40,12 @@ const STATUS_LABEL: Record<string, string> = {
  * editor re-initialises from the new seed; autosave only touches the
  * live buffer and never resets the editor.
  */
+const PAGE_EMOJIS = [
+  '📄','📝','📋','📌','📎','📁','📂','📕','📗','📘','📙','📓','📔','📒',
+  '🎯','💡','🔥','⭐','✅','❌','⚠️','📊','📈','📉','🔢','🔧','⚙️','🔨',
+  '🤖','🧠','💭','💬','🗓️','⏰','🕐','✨','🎨','🎵','🌱','🌍','🚀','💡'
+];
+
 export function PageEditor({ workspace, space, pageId, onSelectPage }: {
   workspace: Workspace;
   space: Space;
@@ -60,6 +66,10 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
   });
   const page = data?.page ?? null;
 
+  const [pageIcon, setPageIcon] = useState<string>(page?.icon ?? '');
+  const pageIconRef = useRef(pageIcon);
+  pageIconRef.current = pageIcon;
+  const [showIconPicker, setShowIconPicker] = useState(false);
   const [title, setTitle] = useState('');
   const [doc, setDoc] = useState<PMNode>(emptyDoc);
   const [seed, setSeed] = useState<PMNode>(emptyDoc);
@@ -144,6 +154,7 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
     if (!p) return Promise.reject(new Error('未选择页面'));
     return put<{ page: PageDetail }>(`/api/pages/${p.id}`, {
       title: titleRef.current || '未命名笔记',
+      icon: pageIconRef.current || null,
       contentJson: docRef.current,
       textContent: extractText(docRef.current),
       contentVersion: p.contentVersion,
@@ -367,11 +378,38 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
           <Star size={16} fill={fav ? 'currentColor' : 'none'} />
         </button>
       </div>
-      <input
-        className="title-input"
-        value={title}
-        placeholder="无标题（可用 emoji 前缀，如 📝 会议记录）"
-        onChange={(e) => { setTitle(e.target.value); setDirty(true); }}
+      <div className="page-title-row">
+        <button
+          className="page-icon-btn"
+          title="选择页面图标"
+          onClick={() => setShowIconPicker((v) => !v)}
+        >
+          {pageIcon || '📄'}
+        </button>
+        {showIconPicker && (
+          <div className="emoji-picker" contentEditable={false}>
+            {PAGE_EMOJIS.map((e) => (
+              <button
+                key={e}
+                className="emoji-item"
+                onMouseDown={(ev) => { ev.preventDefault(); setPageIcon(e); setShowIconPicker(false); setDirty(true); }}
+              >
+                {e}
+              </button>
+            ))}
+            <button
+              className="emoji-item emoji-clear"
+              onMouseDown={(ev) => { ev.preventDefault(); setPageIcon(''); setShowIconPicker(false); setDirty(true); }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        <input
+          className="title-input"
+          value={title}
+          placeholder="无标题笔记"
+          onChange={(e) => { setTitle(e.target.value); setDirty(true); }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault();
@@ -379,7 +417,8 @@ export function PageEditor({ workspace, space, pageId, onSelectPage }: {
             pm?.focus();
           }
         }}
-      />
+        />
+      </div>
       <RichEditor
         key={`${page.id}:${ek}`}
         content={seed}

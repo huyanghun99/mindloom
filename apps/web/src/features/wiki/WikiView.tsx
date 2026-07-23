@@ -4,6 +4,7 @@ import { useAdaptivePolling } from '../../hooks/useAdaptivePolling';
 import { Archive, Brain, Check, Layers, Link2, Network, Pause, Pencil, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Trash2, X, Zap } from 'lucide-react';
 import { api, post, consolidateSpace, getJob, skipPageLlm, updateTopic, archiveTopic, reactivateTopic, deleteTopic } from '../../api';
 import { useToast } from '../../components/Toast';
+import { useDialog } from '../../components/Dialog';
 import { EmptyState } from '../../components/EmptyState';
 import { ErrorState } from '../../components/ErrorState';
 import { SkeletonList } from '../../components/Skeleton';
@@ -78,6 +79,7 @@ function TopicContentView({ topic }: { topic: WikiTopic }) {
 export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id: string) => void }) {
   const qc = useQueryClient();
   const toast = useToast();
+  const dialog = useDialog();
   const [tab, setTab] = useState<'inbox' | 'suggestions' | 'topics'>('inbox');
   // Phase B3.2: Topic list dimension filters (lifecycle + source).
   const [topicLifecycle, setTopicLifecycle] = useState<'active' | 'archived'>('active');
@@ -556,11 +558,11 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
                     {activeTopic.pinned ? <><PinOff size={14} /> 取消置顶</> : <><Pin size={14} /> 置顶</>}
                   </button>
                   {activeTopic.lifecycleStatus !== 'archived' ? (
-                    <button className="ghost" disabled={archiveM.isPending} onClick={() => { if (confirm('归档后该主题将降权但仍可搜索，可在归档中心恢复。确认归档？')) archiveM.mutate(); }}><Archive size={14} /> 归档</button>
+                    <button className="ghost" disabled={archiveM.isPending} onClick={async () => { const ok = await dialog.confirm({ title: '归档主题', message: '归档后该主题将降权但仍可搜索，可在归档中心恢复。', confirmText: '归档', danger: true }); if (ok) archiveM.mutate(); }}><Archive size={14} /> 归档</button>
                   ) : (
                     <button className="ghost" disabled={reactivateM.isPending} onClick={() => reactivateM.mutate()}><RotateCcw size={14} /> 恢复</button>
                   )}
-                  <button className="ghost danger" disabled={deleteM.isPending} onClick={() => { if (confirm('删除后主题不会立即消失，而是进入归档中心（可恢复）。确认删除？')) deleteM.mutate(); }}><Trash2 size={14} /> 删除</button>
+                  <button className="ghost danger" disabled={deleteM.isPending} onClick={async () => { const ok = await dialog.confirm({ title: '删除主题', message: '删除后主题不会立即消失，而是进入归档中心（可恢复）。', confirmText: '删除', danger: true }); if (ok) deleteM.mutate(); }}><Trash2 size={14} /> 删除</button>
                 </div>
                 <h4>来源页面（{topicSources?.sources?.length ?? 0}）</h4>
                 <div className="topic-sources">

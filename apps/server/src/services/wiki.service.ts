@@ -1,6 +1,7 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { llmSuggestions, topicCandidates, wikiTopics, topicSources, documentChunks, topicOperations, topicSynonyms } from '@mindloom/db';
+import { logger } from './logger';
 import { createAiProviderForContext, vectorToSqlLiteral, isAiDisabledError } from './ai.service';
 import { recordActivity } from './activity.service';
 import { env } from '../env';
@@ -601,7 +602,11 @@ export async function consolidateCandidates(
   // hang the worker. Extra candidates stay as candidates for the next run.
   const MAX_CANDIDATES = 500;
   if (candidates.length > MAX_CANDIDATES) {
-    console.warn(`[consolidate] space ${spaceId}: ${candidates.length} candidates > ${MAX_CANDIDATES}; clustering first ${MAX_CANDIDATES} only.`);
+    logger.warn('consolidate candidates exceeds cap, clustering head only', {
+      spaceId,
+      count: candidates.length,
+      cap: MAX_CANDIDATES
+    });
     candidates.length = MAX_CANDIDATES;
   }
 
@@ -706,10 +711,20 @@ export async function consolidateCandidates(
 
   const groupEntries = [...groups.entries()];
   for (let gi = 0; gi < groupEntries.length; gi++) {
-    const [norm, group] = groupEntries[gi];
+    const [normKey, group] = groupEntries[gi];
     await onProgress?.({ done: gi, total: totalGroups, stage: 'creating' });
     // Already have a Topic for this concept -> link candidates to it.
-    const existingTopic = existingByNorm.get(norm);
+    // F14: check ALL normalized titles in the group (not just the first),
+    // because merged groups may contain multiple distinct titles that all
+    // map to the same existing Topic via synonym normalization.
+    let existingTopic = existingByNorm.get(normKey);
+    if (!existingTopic) {
+      for (const c of group) {
+        const altKey = norm(c.title);
+        const found = existingByNorm.get(altKey);
+        if (found) { existingTopic = found; break; }
+      }
+    }
     if (existingTopic) {
       for (const c of group) {
         await db
@@ -757,8 +772,8 @@ export async function consolidateCandidates(
         status: 'suggested',
         source: 'ai_generated',
         aiSummary: synth.definition || synth.overview.slice(0, 200),
-        aliases: [norm],
-        normalizedTitle: norm,
+        aliases: [normKey],
+        normalizedTitle: normKey,
         synthesisVersion: 'topic-synthesis-v1',
         // Phase 1 (D4): a clustered draft Topic is fresh + active, awaiting review.
         publicationStatus: 'draft',

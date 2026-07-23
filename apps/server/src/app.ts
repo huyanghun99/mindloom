@@ -18,9 +18,12 @@ import { graphRoutes } from './routes/graph';
 import { shareRoutes } from './routes/shares';
 import { importExportRoutes } from './routes/import-export';
 import { jobRoutes } from './routes/jobs';
+import { settingsRoutes } from './routes/settings';
 import { publicRoutes } from './routes/public';
 import { backupRoutes } from './routes/backups';
-import { healthHandler, diagnosticsHandler } from './routes/health';
+import { healthHandler, diagnosticsHandler, metricsHandler } from './routes/health';
+import { requestIdMiddleware } from './middleware/request-id';
+import { logger } from './services/logger';
 
 export function createApp() {
   const app = new Hono();
@@ -33,9 +36,11 @@ export function createApp() {
       : ['http://127.0.0.1:5173', 'http://localhost:5173'];
   app.use('*', cors({ origin: corsOrigin, credentials: true }));
   app.use('*', csrfGuard);
+  app.use('*', requestIdMiddleware());
   app.get('/health', healthHandler);
   app.get('/health/', healthHandler);
   app.get('/health/diagnostics', diagnosticsHandler);
+  app.get('/health/metrics', metricsHandler);
   app.route('/api/auth', authRoutes);
   app.route('/api/workspaces', workspaceRoutes);
   app.route('/api/spaces', spaceRoutes);
@@ -51,6 +56,7 @@ export function createApp() {
   app.route('/api/io', importExportRoutes);
   app.route('/api/backups', backupRoutes);
   app.route('/api/jobs', jobRoutes);
+  app.route('/api/settings', settingsRoutes);
   app.route('/api/public', publicRoutes);
   // Serve the built web app only when the production bundle exists.
   // In dev the Vite server (5173) handles the UI; this avoids noisy
@@ -62,7 +68,7 @@ export function createApp() {
   }
   app.notFound((c) => c.json({ error: 'Not found' }, 404));
   app.onError((err, c) => {
-    console.error(err);
+    logger.error('unhandled error', { err: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
     return c.json({ error: 'Internal server error', message: err.message }, 500);
   });
   return app;

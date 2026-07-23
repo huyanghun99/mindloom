@@ -39,12 +39,14 @@ export const createPageSchema = z.object({
   spaceId: z.string().uuid(),
   parentPageId: z.string().uuid().nullable().optional(),
   title: z.string().min(1).max(300),
+  icon: z.string().max(100).nullable().optional(),
   contentJson: z.unknown().optional(),
   textContent: z.string().default('')
 });
 
 export const updatePageSchema = z.object({
   title: z.string().min(1).max(300).optional(),
+  icon: z.string().max(100).nullable().optional(),
   contentJson: z.unknown().optional(),
   textContent: z.string().optional(),
   contentVersion: z.number().int().positive().optional(),
@@ -357,3 +359,17 @@ export const deriveTopicSchema = z.object({
   newTitle: z.string().min(1).max(300).optional()
 });
 export type DeriveTopicInput = z.infer<typeof deriveTopicSchema>;
+
+// Phase G (S1): user-level AI provider override. The client sends the API key
+// in plaintext over HTTPS; the server encrypts it before persisting and never
+// returns the plaintext or ciphertext back (only a masked preview).
+export const saveAiConfigSchema = z.object({
+  driver: z.enum(['mock', 'openai', 'openai-compatible', 'ollama', 'gemini']),
+  baseUrl: z.string().max(500).optional().or(z.literal('')),
+  apiKey: z.string().max(500).optional().or(z.literal('')),
+  completionModel: z.string().min(1).max(200),
+  embeddingModel: z.string().min(1).max(200),
+  embeddingDimension: z.number().int().positive().default(1536),
+  personalOverrideEnabled: z.boolean().default(true)
+});
+export type SaveAiConfigInput = z.infer<typeof saveAiConfigSchema>;

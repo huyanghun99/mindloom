@@ -16,6 +16,7 @@ export type PageNode = {
   parentPageId: string | null;
   position: number;
   title: string;
+  icon?: string | null;
   llmProcessStatus: string;
   hasChildren: boolean;
   updatedAt?: string;
@@ -27,6 +28,7 @@ export type PageNode = {
 export type PageDetail = {
   id: string;
   title: string;
+  icon?: string | null;
   contentJson: unknown;
   textContent: string;
   contentVersion: number;

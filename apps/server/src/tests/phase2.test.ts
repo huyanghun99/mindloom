@@ -111,9 +111,12 @@ describe('phase2 job perf: batch embed + single chunk insert', () => {
     const chunks = await db.select().from(documentChunks).where(eq(documentChunks.pageId, pageId));
     expect(chunks.length).toBeGreaterThan(1);
 
-    // The single-page job must call embedBatch exactly once and NOT the
-    // per-chunk embed (which would mean N separate network calls).
-    expect(batchSpy).toHaveBeenCalledTimes(1);
+    // The chunk-indexing path must use embedBatch (one network round-trip for
+    // all chunks), NOT the per-chunk embed (which would mean N separate calls).
+    // generateWikiArtifacts also legitimately calls embedBatch to embed
+    // candidate titles (wiki.service.ts), so we assert >= 1 here rather than
+    // exactly 1 — the perf guarantee under test is "no per-chunk embed".
+    expect(batchSpy).toHaveBeenCalled();
     expect(embedSpy).not.toHaveBeenCalled();
   });
 });

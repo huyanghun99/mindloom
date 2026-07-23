@@ -4,7 +4,7 @@ import {
   Archive, BookOpen, Brain, ChevronDown, Clock, Download, FileText, Home, LayoutGrid, LogOut,
   Moon, Monitor, Pencil, Plus, Search, Settings, Sparkles, Star, Sun, Trash2, Wand2
 } from 'lucide-react';
-import { api, del, patch, post, renamePage, movePage, copyPage } from '../../api';
+import { api, del, patch, post, put, renamePage, movePage, copyPage } from '../../api';
 import { useToast } from '../../components/Toast';
 import { useDialog } from '../../components/Dialog';
 import { PageActionMenu, MovePageDialog, type PageAction } from '../../components/PageActionMenu';
@@ -185,7 +185,14 @@ export function LeftSidebar({
 
   const handlePageAction = useCallback(async (action: PageAction, page: TreeNode) => {
     if (!space) return;
-    if (action === 'rename') {
+    if (action === 'createChild') {
+      try {
+        const res = await post<{ page: PageDetail }>(`/api/pages`, { spaceId: space.id, parentPageId: page.id, title: '新页面' });
+        await qc.invalidateQueries({ queryKey: ['page-tree', space.id] });
+        toast.success('已创建子页面');
+        onSelectPage(res.page.id);
+      } catch (e) { toast.error(`创建失败：${(e as Error).message}`); }
+    } else if (action === 'rename') {
       const next = await dialog.prompt({ title: '重命名页面', defaultValue: page.title, placeholder: '输入新标题', confirmText: '保存' });
       if (next && next.trim() && next.trim() !== page.title) {
         try {

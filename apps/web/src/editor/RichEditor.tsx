@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
-import { EditorContent, useEditor, type Editor } from '@tiptap/react';
+import { EditorContent, useEditor, type Editor, ReactNodeViewRenderer } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import TextStyle from '@tiptap/extension-text-style';
@@ -30,6 +30,8 @@ import { Drawio } from './Drawio';
 import { Excalidraw } from './Excalidraw';
 import { MarkdownShortcuts } from './MarkdownShortcuts';
 import { BubbleMenu } from './BubbleMenu';
+import { EditorToolbar } from './EditorToolbar';
+import { ImageView } from './ImageView';
 import { BlockHandle } from './BlockHandle';
 import { useUploads, inferKind } from './useUploads';
 import { UploadOverlay } from './UploadOverlay';
@@ -145,7 +147,18 @@ export function RichEditor({ content, editable = true, workspaceId, spaceId, pag
       Highlight.configure({ multicolor: true }),
       Underline,
       Link.configure({ openOnClick: false, autolink: true, HTMLAttributes: { rel: 'noopener noreferrer', target: '_blank' } }),
-      Image.configure({ inline: false, allowBase64: false }),
+      Image.extend({
+      addAttributes() {
+        return {
+          ...this.parent?.(),
+          width: { default: null, parseHTML: (el) => { const w = el.getAttribute('width') || el.style.width; return w ? parseInt(String(w).replace('px', '')) || null : null; }, renderHTML: (attrs) => attrs.width ? { width: attrs.width, style: `width: ${attrs.width}px` } : {} },
+          align: { default: 'left', parseHTML: (el) => { const p = el.parentElement?.style.textAlign; return p === 'center' ? 'center' : p === 'right' ? 'right' : 'left'; }, renderHTML: () => ({}) }
+        };
+      },
+      addNodeView() {
+        return ReactNodeViewRenderer(ImageView);
+      }
+    }).configure({ inline: false, allowBase64: false }),
       TaskList,
       TaskItem.configure({ nested: true }),
       Table.configure({ resizable: true }),
@@ -253,6 +266,7 @@ export function RichEditor({ content, editable = true, workspaceId, spaceId, pag
 
   return (
     <div className="rich-editor">
+      <EditorToolbar editor={editor} />
       <EditorContent editor={editor} className="editor-content" />
 
       <BubbleMenu

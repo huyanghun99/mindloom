@@ -2,6 +2,8 @@ import { Hono, type Context } from 'hono';
 import { sql } from 'drizzle-orm';
 import { pool } from '../db/client';
 import { db } from '../db/client';
+import { getDbJobMetrics } from '../services/job-metrics-db';
+import { logger } from '../services/logger';
 
 const startedAt = Date.now();
 
@@ -43,6 +45,34 @@ export async function diagnosticsHandler(c: Context) {
     logLines.push(`Database: disconnected (${err instanceof Error ? err.message : String(err)})`);
   }
   return c.text(logLines.join('\n'));
+}
+
+/**
+ * Phase H (N2): durable ops metrics aggregated from the `jobs` table.
+ *
+ * Unlike the in-memory `/api/jobs/metrics` counters (which reset on restart
+ * and are per-worker), this endpoint reads from PostgreSQL so numbers survive
+ * restarts and are correct under multi-worker deployments. Returns queue
+ * depth, totals, per-type breakdown, recent failures, AI token usage and a
+ * 1-hour latency / success-rate slice.
+ *
+ * Unauthenticated by design: it leaks no PII, only operational aggregates.
+ * In production front it with a network-level allow-list (or reverse proxy
+ * auth) rather than a session cookie — ops dashboards should not need a
+ * user session.
+ */
+export async function metricsHandler(c: Context) {
+  try {
+    const metrics = await getDbJobMetrics();
+    return c.json({
+      service: 'mindloom-server',
+      uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+      ...metrics
+    });
+  } catch (err) {
+    logger.error('metrics endpoint failed', { err: err instanceof Error ? err.message : String(err) });
+    return c.json({ error: 'metrics unavailable' }, 503);
+  }
 }
 
 // Retained for backward compatibility; prefer registering healthHandler directly.

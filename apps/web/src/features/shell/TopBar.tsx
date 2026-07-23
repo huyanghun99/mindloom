@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Check, ChevronRight, Download, Loader2, MoreHorizontal,
-  Printer, Search, Share2, Trash2, Upload
+  Check, ChevronDown, ChevronRight, Download, Loader2, MoreHorizontal,
+  Printer, Search, Settings, Share2, Trash2, Upload
 } from 'lucide-react';
 import { useEditorStatus } from './editorStatus';
 import { SaveIndicator } from './SaveIndicator';
@@ -33,19 +33,27 @@ function buildCrumbChain(tree: TreeNode[] | undefined, pageId: string | null): T
   return chain;
 }
 
-export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalette, tree }: {
+export function TopBar({ workspace, workspaces, space, spaces, route, pageId, pageTitle, onOpenPalette, onSwitchWorkspace, onSwitchSpace, tree }: {
   workspace: Workspace | null;
+  workspaces: Workspace[];
   space: Space | null;
+  spaces: Space[];
   route: MainRoute;
   pageId: string | null;
   pageTitle?: string | null;
   onOpenPalette: () => void;
+  onSwitchWorkspace?: (wsId: string) => void;
+  onSwitchSpace?: (spId: string) => void;
   tree?: TreeNode[];
 }) {
   const navigate = useNavigate();
   const { status } = useEditorStatus();
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
+  const [wsDropdown, setWsDropdown] = useState(false);
+  const [spaceDropdown, setSpaceDropdown] = useState(false);
+  const wsDropRef = useRef<HTMLDivElement | null>(null);
+  const spDropRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!moreOpen) return;
@@ -55,6 +63,16 @@ export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalet
     window.addEventListener('mousedown', onClick);
     return () => window.removeEventListener('mousedown', onClick);
   }, [moreOpen]);
+
+  useEffect(() => {
+    if (!wsDropdown && !spaceDropdown) return;
+    const onClick = (e: MouseEvent) => {
+      if (wsDropRef.current && !wsDropRef.current.contains(e.target as Node)) setWsDropdown(false);
+      if (spDropRef.current && !spDropRef.current.contains(e.target as Node)) setSpaceDropdown(false);
+    };
+    window.addEventListener('mousedown', onClick);
+    return () => window.removeEventListener('mousedown', onClick);
+  }, [wsDropdown, spaceDropdown]);
 
   const goSpaceHome = () => {
     if (workspace && space) navigate(urls.spaceHome(workspace.id, space.id));
@@ -72,14 +90,50 @@ export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalet
   return (
     <header className="topbar">
       <div className="crumbs">
-        {/* Workspace — clickable */}
-        <button className="crumb-link" onClick={goSpaceHome}>{workspace?.name ?? '知识库'}</button>
+        {/* Workspace — clickable + dropdown */}
+        <div className="crumb-dropdown" ref={wsDropRef}>
+          <button className="crumb-link" onClick={() => setWsDropdown((v) => !v)}>
+            {workspace?.name ?? '知识库'} <ChevronDown size={11} />
+          </button>
+          {wsDropdown && onSwitchWorkspace && (
+            <div className="crumb-pop">
+              {workspaces.map((ws) => (
+                <button key={ws.id} className={`crumb-pop-item${ws.id === workspace?.id ? ' active' : ''}`}
+                  onClick={() => { setWsDropdown(false); onSwitchWorkspace?.(ws.id); }}>
+                  {ws.name}
+                </button>
+              ))}
+              <div className="crumb-pop-sep" />
+              <button className="crumb-pop-item" onClick={() => { setWsDropdown(false); navigate(urls.settings()); }}>
+                <Settings size={13} /> 知识库设置
+              </button>
+            </div>
+          )}
+        </div>
 
-        {/* Space — clickable */}
+        {/* Space — clickable + dropdown */}
         {space && (
           <>
             <ChevronRight size={13} className="crumb-sep" />
-            <button className="crumb-link" onClick={goSpaceHome}>{space.name}</button>
+            <div className="crumb-dropdown" ref={spDropRef}>
+              <button className="crumb-link" onClick={() => setSpaceDropdown((v) => !v)}>
+                {space.name} <ChevronDown size={11} />
+              </button>
+              {spaceDropdown && spaces.length > 0 && (
+                <div className="crumb-pop">
+                  {spaces.map((sp) => (
+                    <button key={sp.id} className={`crumb-pop-item${sp.id === space.id ? ' active' : ''}`}
+                      onClick={() => { setSpaceDropdown(false); onSwitchSpace?.(sp.id); }}>
+                      {sp.name}
+                    </button>
+                  ))}
+                  <div className="crumb-pop-sep" />
+                  <button className="crumb-pop-item" onClick={() => { setSpaceDropdown(false); navigate(urls.settings()); }}>
+                    <Settings size={13} /> 空间设置
+                  </button>
+                </div>
+              )}
+            </div>
           </>
         )}
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, post, del } from './api';
+import { useDialog } from './components/Dialog';
 
 type ShareRow = {
   id: string;
@@ -20,6 +21,7 @@ export function ShareModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
+  const dialog = useDialog();
   const [mode, setMode] = useState<'live' | 'snapshot'>('live');
   const [createdToken, setCreatedToken] = useState('');
   const [copied, setCopied] = useState(false);
@@ -92,7 +94,7 @@ export function ShareModal({
                 <code className="share-token">{window.location.origin}/share/{s.shareToken}</code>
                 <button className="icon-btn" title="复制" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/share/${s.shareToken}`); }}>⎘</button>
                 <button className="icon-btn" title="重置令牌" onClick={() => regen.mutate(s.id)}>↻</button>
-                <button className="icon-btn danger" title="撤销" onClick={() => { if (confirm('撤销该分享链接？')) remove.mutate(s.id); }}>🗑</button>
+                <button className="icon-btn danger" title="撤销" onClick={async () => { const ok = await dialog.confirm({ title: '撤销分享链接', message: '撤销后该链接将立即失效，已分享的页面将无法访问。', confirmText: '撤销', danger: true }); if (ok) remove.mutate(s.id); }}>🗑</button>
               </div>
             ))}
           </div>

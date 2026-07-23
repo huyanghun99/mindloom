@@ -219,7 +219,7 @@ export function PageTree({
               ) : (
                 <span className="tree-caret" />
               )}
-              <FileText size={14} />
+              {node.icon ? <span className="row-icon-emoji">{node.icon}</span> : <FileText size={14} />}
               <span className="tree-title">{node.title || '未命名笔记'}</span>
               <span className={`dot status-${node.llmProcessStatus}`} title={statusLabel(node.llmProcessStatus)} />
               {onMore && (

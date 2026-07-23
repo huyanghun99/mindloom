@@ -362,3 +362,34 @@ export function copyPage(input: {
 }): Promise<{ page: PageDetail }> {
   return post(`/api/pages`, input);
 }
+
+/* ------------------------------- settings (Phase G S1) ------------------ */
+// User-level AI provider override. The API key is encrypted server-side and
+// only a masked preview is ever returned to the client.
+
+export interface AiConfigDTO {
+  driver: string;
+  baseUrl: string;
+  apiKeyMasked: string;
+  hasApiKey: boolean;
+  completionModel: string;
+  embeddingModel: string;
+  embeddingDimension: number;
+  personalOverrideEnabled: boolean;
+}
+
+export function getAiConfig(): Promise<{ config: AiConfigDTO | null }> {
+  return get('/api/settings/ai-config');
+}
+
+export function saveAiConfig(input: {
+  driver: string;
+  baseUrl?: string;
+  apiKey?: string;
+  completionModel: string;
+  embeddingModel: string;
+  embeddingDimension: number;
+  personalOverrideEnabled: boolean;
+}): Promise<{ ok: boolean }> {
+  return put('/api/settings/ai-config', input);
+}

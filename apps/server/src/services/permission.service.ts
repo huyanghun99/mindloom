@@ -57,14 +57,37 @@ export async function canEditPage(userId: string, pageId: string): Promise<boole
   return canEditSpace(userId, page.spaceId);
 }
 
+// Phase J (S10): short-TTL cache for getReadableSpaceIds. This function is
+// called on every search and page-list request; without caching each call
+// costs one SQL round-trip. A 60s TTL keeps results fresh enough for normal
+// use (a member change is visible within 60s) while cutting DB load under
+// burst traffic. For multi-worker deployments, swap this for a shared cache.
+const READABLE_SPACES_TTL_MS = 60 * 1000;
+interface CachedSpaces { ids: string[]; ts: number; }
+const readableSpacesCache = new Map<string, CachedSpaces>();
+
 export async function getReadableSpaceIds(userId: string, workspaceId: string): Promise<string[]> {
+  const key = `${userId}|${workspaceId}`;
+  const hit = readableSpacesCache.get(key);
+  if (hit && Date.now() - hit.ts < READABLE_SPACES_TTL_MS) return hit.ids;
   const rows = await db.execute<{ space_id: string }>(sql`
     SELECT sm.space_id
     FROM space_members sm
     JOIN spaces s ON s.id = sm.space_id
     WHERE sm.user_id = ${userId} AND s.workspace_id = ${workspaceId}
   `);
-  return rows.rows.map((r) => r.space_id);
+  const ids = rows.rows.map((r) => r.space_id);
+  readableSpacesCache.set(key, { ids, ts: Date.now() });
+  return ids;
+}
+
+/** Invalidate cached space memberships for a user (call after member changes). */
+export function invalidateReadableSpacesCache(userId?: string, workspaceId?: string): void {
+  if (!userId) { readableSpacesCache.clear(); return; }
+  const prefix = workspaceId ? `${userId}|${workspaceId}` : `${userId}|`;
+  for (const key of readableSpacesCache.keys()) {
+    if (key.startsWith(prefix)) readableSpacesCache.delete(key);
+  }
 }
 
 export async function getSpaceWorkspaceId(spaceId: string): Promise<string | null> {

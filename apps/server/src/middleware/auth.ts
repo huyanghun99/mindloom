@@ -74,8 +74,19 @@ export async function getSessionUserByToken(
   if (!sess) return null;
   const [user] = await db.select().from(users).where(eq(users.id, sess.userId)).limit(1);
   if (!user) return null;
-  // Best-effort last-used refresh.
-  await db.update(sessions).set({ lastUsedAt: new Date() }).where(eq(sessions.id, sess.id)).catch(() => {});
+  // Phase K (S9): sliding session renewal. Update lastUsedAt on every request,
+  // and if less than 1/3 of the TTL remains, extend expiresAt by a full TTL
+  // (capped at 30 days from now) so active users are not kicked out. Idle
+  // sessions still expire on schedule because they never trigger this path.
+  const now = Date.now();
+  const ttlMs = SESSION_TTL_DAYS * 86_400_000;
+  const remainingMs = sess.expiresAt.getTime() - now;
+  const shouldRenew = remainingMs < ttlMs / 3;
+  const newExpiresAt = shouldRenew ? new Date(Math.min(now + ttlMs, now + 30 * 86_400_000)) : null;
+  await db.update(sessions)
+    .set({ lastUsedAt: new Date(now), ...(newExpiresAt ? { expiresAt: newExpiresAt } : {}) })
+    .where(eq(sessions.id, sess.id))
+    .catch(() => {});
   return {
     user: {
       id: user.id,

@@ -24,6 +24,7 @@ export interface LightPageRow {
   parentPageId: string | null;
   position: number;
   title: string;
+  icon: string | null;
   status: string;
   llmProcessStatus: string;
   createdAt: string;
@@ -38,6 +39,7 @@ const LIGHT_COLUMNS = {
   parentPageId: pages.parentPageId,
   position: pages.position,
   title: pages.title,
+  icon: pages.icon,
   status: pages.status,
   llmProcessStatus: pages.llmProcessStatus,
   createdAt: pages.createdAt,

@@ -129,6 +129,7 @@ export const pages = pgTable('pages', {
   parentPageId: uuid('parent_page_id'),
   position: integer('position').notNull().default(0),
   title: text('title').notNull(),
+  icon: text('icon'),
   contentJson: jsonb('content_json').$type<unknown>().notNull().default({ type: 'doc', content: [] }),
   textContent: text('text_content').notNull().default(''),
   ftsTokens: text('fts_tokens').notNull().default(''),
@@ -276,6 +277,11 @@ export const topicCandidates = pgTable('topic_candidates', {
 }));
 
 export const topicSources = pgTable('topic_sources', {
+  // Phase H (S4): added surrogate id PK so chunk-level provenance rows can
+  // coexist for the same (topicId, pageId). Previously the PK was
+  // (topicId, pageId), which silently dropped a second chunk via
+  // onConflictDoNothing — RAG traceability degraded to page-level.
+  id: uuid('id').primaryKey().defaultRandom(),
   topicId: uuid('topic_id').notNull().references(() => wikiTopics.id, { onDelete: 'cascade' }),
   pageId: uuid('page_id').notNull().references(() => pages.id, { onDelete: 'cascade' }),
   chunkId: uuid('chunk_id').references(() => documentChunks.id, { onDelete: 'set null' }),
@@ -288,7 +294,17 @@ export const topicSources = pgTable('topic_sources', {
   addedBy: text('added_by').notNull().default('ai'),
   contributionType: text('contribution_type'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
-}, (t) => ({ pk: primaryKey({ columns: [t.topicId, t.pageId] }) }));
+}, (t) => ({
+  // Two partial unique indexes preserve the old dedupe semantics while
+  // allowing multiple chunks per (topicId, pageId):
+  //   - chunkId IS NULL  -> page-level source (legacy / user-added), one per page
+  //   - chunkId IS NOT NULL -> chunk-level source, one per chunk
+  // Postgres ON CONFLICT DO NOTHING without a target picks the matching
+  // partial index automatically, so existing onConflictDoNothing() calls
+  // keep working without specifying a target.
+  pageLevelUnique: uniqueIndex('uidx_topic_sources_page').on(t.topicId, t.pageId).where(sql`chunk_id IS NULL`),
+  chunkLevelUnique: uniqueIndex('uidx_topic_sources_chunk').on(t.topicId, t.pageId, t.chunkId).where(sql`chunk_id IS NOT NULL`)
+}));
 
 // Phase B (B1.1): synonym / alias normalisation table. Maps a normalized term
 // (e.g. "ml", "机器学习", "机器智能") to a single canonical key (e.g.

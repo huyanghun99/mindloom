@@ -3,12 +3,13 @@ import { serve } from '@hono/node-server';
 import { createApp } from './app';
 import { env } from './env';
 import { startJobRunner, stopJobRunner } from './services/job-runner';
+import { logger } from './services/logger';
 
 const app = createApp();
 startJobRunner();
 
 const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {
-  console.log(`MindLoom API listening on http://127.0.0.1:${info.port}`);
+  logger.info('MindLoom API listening', { port: info.port, host: `http://127.0.0.1:${info.port}` });
 });
 
 // Graceful shutdown: stop the poll loop, let an in-flight job finish, then close
@@ -17,10 +18,10 @@ let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`Received ${signal}, shutting down gracefully...`);
+  logger.info('shutdown requested', { signal });
   await stopJobRunner();
   server.close(() => {
-    console.log('HTTP server closed.');
+    logger.info('HTTP server closed');
     process.exit(0);
   });
   // Force-exit if connections keep the server from closing.

@@ -36,7 +36,7 @@ export function RightPanel({ workspace, space, pageId, onOpenPage, onClose }: {
   onOpenPage: (id: string) => void;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<Tab>('summary');
+  const [tab, setTab] = useState<Tab>('outline');
 
   const { data } = useQuery<{ page: PageDetail }>({
     queryKey: ['page-detail', pageId],

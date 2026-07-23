@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { env } from '../env';
 import { db } from '../db/client';
 import { spaces, workspaces, aiConfigs } from '@mindloom/db';
+import { decryptSecret } from '../utils/crypto';
 
 // Re-export everything from the shared AI package so existing imports
 // (`MockAiProvider`, `AiProvider`, `AiMessage`, `vectorToSqlLiteral`,
@@ -97,11 +98,15 @@ export async function resolveWorkspaceRuntimeConfig(ctx: AiContext): Promise<Res
       if (cfg) {
         if (cfg.driver) driver = cfg.driver;
         if (cfg.baseUrl) baseUrl = cfg.baseUrl;
-        if (cfg.encryptedApiKey) apiKey = cfg.encryptedApiKey;
+        if (cfg.encryptedApiKey) {
+          try { apiKey = decryptSecret(cfg.encryptedApiKey); } catch { apiKey = ''; }
+        }
         if (cfg.completionModel) completionModel = cfg.completionModel;
         // ai_configs shares baseUrl / encryptedApiKey for both chat and embedding.
         if (cfg.baseUrl) embeddingBaseUrl = cfg.baseUrl;
-        if (cfg.encryptedApiKey) embeddingApiKey = cfg.encryptedApiKey;
+        if (cfg.encryptedApiKey) {
+          try { embeddingApiKey = decryptSecret(cfg.encryptedApiKey); } catch { embeddingApiKey = ''; }
+        }
         if (cfg.embeddingModel) embeddingModel = cfg.embeddingModel;
         if (cfg.embeddingDimension) embeddingDimension = cfg.embeddingDimension;
       }

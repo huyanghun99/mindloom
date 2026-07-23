@@ -34,21 +34,23 @@ export function BlockFrame({
       data-block-id={id ?? undefined}
       data-kind={kind}
     >
-      <div className="ml-block-bar" contentEditable={false}>
-        <span className="ml-block-badge">{label}</span>
-        {actions ? <div className="ml-block-actions">{actions}</div> : <span className="ml-block-spacer" />}
-        <button
-          type="button"
-          className="ml-block-del"
-          title="删除"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onDelete();
-          }}
-        >
-          <Trash2 size={13} />
-        </button>
-      </div>
+      {selected && (
+        <div className="ml-block-bar" contentEditable={false}>
+          <span className="ml-block-badge">{label}</span>
+          {actions ? <div className="ml-block-actions">{actions}</div> : <span className="ml-block-spacer" />}
+          <button
+            type="button"
+            className="ml-block-del"
+            title="删除"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              onDelete();
+            }}
+          >
+            <Trash2 size={13} />
+          </button>
+        </div>
+      )}
       {children}
     </NodeViewWrapper>
   );

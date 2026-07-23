@@ -323,7 +323,9 @@ export function ShellLayout({ me }: { me: User }) {
       <div className="main-col">
         <TopBar
           workspace={workspace}
+          workspaces={workspaces ?? []}
           space={space}
+          spaces={spaces ?? []}
           route={activeRoute}
           pageId={pageId}
           pageTitle={ctx.pageTitle}

@@ -4,6 +4,7 @@ import { db } from '../db/client';
 import { createAiProviderForContext, isAiDisabledError, vectorToSqlLiteral, type AiProvider } from './ai.service';
 import { getReadableSpaceIds } from './permission.service';
 import { tokenizeChineseFriendly } from '../utils/text';
+import { logger } from './logger';
 
 interface RankedRow {
   id: string;
@@ -17,28 +18,41 @@ interface RankedRow {
 }
 
 /**
- * Query-embedding cache (Phase 2 perf).
+ * Query-embedding cache (Phase 2 perf, Phase H S6 hardening).
  *
  * The semantic branch needs a vector for the *user's query string*. Without
  * caching, every debounced keystroke that lands on a cache miss would call
- * the remote embedding endpoint. We memoise per normalised query so repeated
- * searches (and the brief re-fires that slip past the client debounce) reuse
- * the vector instead of hitting the network. Bounded LRU by insertion order.
+ * the remote embedding endpoint. We memoise per (embeddingModel, normalised
+ * query) so repeated searches reuse the vector instead of hitting the
+ * network.
+ *
+ * Phase H (S6) fixes three remaining gaps:
+ *  - TTL: entries expire after QUERY_CACHE_TTL_MS so a long-lived process
+ *    does not serve stale embeddings indefinitely.
+ *  - Model-aware key: cache key includes embeddingModel, so swapping the
+ *    model (e.g. mock -> text-embedding-3-small) invalidates old vectors
+ *    automatically instead of returning wrong-dimension hits.
+ *  - Bounded LRU by insertion order (unchanged, QUERY_CACHE_MAX).
  */
-const QUERY_EMBEDDING_CACHE = new Map<string, number[]>();
+interface CacheEntry {
+  vector: number[];
+  ts: number;
+}
+const QUERY_EMBEDDING_CACHE = new Map<string, CacheEntry>();
 const QUERY_CACHE_MAX = 512;
+const QUERY_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 async function embedQuery(ai: AiProvider, query: string): Promise<number[] | null> {
-  const key = query.trim().toLowerCase();
+  const key = `${ai.embeddingModel ?? 'default'}|${query.trim().toLowerCase()}`;
   if (!key) return null;
   const hit = QUERY_EMBEDDING_CACHE.get(key);
-  if (hit) return hit;
+  if (hit && Date.now() - hit.ts < QUERY_CACHE_TTL_MS) return hit.vector;
   const emb = await ai.embed(query);
   if (QUERY_EMBEDDING_CACHE.size >= QUERY_CACHE_MAX) {
     const oldest = QUERY_EMBEDDING_CACHE.keys().next().value;
     if (oldest !== undefined) QUERY_EMBEDDING_CACHE.delete(oldest);
   }
-  QUERY_EMBEDDING_CACHE.set(key, emb);
+  QUERY_EMBEDDING_CACHE.set(key, { vector: emb, ts: Date.now() });
   return emb;
 }
 
@@ -156,6 +170,8 @@ export async function hybridSearch(params: {
   const [bm25Res, vectorRes] = await Promise.allSettled([bm25Promise, vectorPromise]);
   const bm25Rows = bm25Res.status === 'fulfilled' ? bm25Res.value.rows : [];
   const vectorRows = vectorRes.status === 'fulfilled' ? vectorRes.value.rows : [];
+  if (bm25Res.status === 'rejected') logger.warn('search bm25 branch failed', { err: bm25Res.reason instanceof Error ? bm25Res.reason.message : String(bm25Res.reason) });
+  if (vectorRes.status === 'rejected') logger.warn('search vector branch failed', { err: vectorRes.reason instanceof Error ? vectorRes.reason.message : String(vectorRes.reason) });
   const fused = rrfFuse(bm25Rows, vectorRows, params.limit);
   const ranked = await applyLifecycleRanking(fused, params.spaceId, params.intent ?? 'current');
   return ranked.map((r) => ({ ...r, excerpt: buildExcerpt(r.content) }));

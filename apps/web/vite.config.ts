@@ -44,6 +44,20 @@ export default defineConfig(() => {
         '/api': { target: 'http://127.0.0.1:39280', changeOrigin: true },
         '/health': { target: 'http://127.0.0.1:39280', changeOrigin: true }
       }
+    },
+    build: {
+      // Phase J (S8): split stable vendor libs into separate chunks so app
+      // code changes don't invalidate the cached vendor bundle, and the main
+      // entry stays under the 500KB minified warning threshold.
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'react-vendor': ['react', 'react-dom', 'react-router-dom'],
+            'tiptap-vendor': ['@tiptap/react', '@tiptap/starter-kit'],
+            'tanstack-vendor': ['@tanstack/react-query']
+          }
+        }
+      }
     }
   };
 });

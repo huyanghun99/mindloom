@@ -1,10 +1,10 @@
 import { useEffect, useRef } from 'react';
 import {
-  Copy, Download, FileText, FolderInput, Share2, Trash2, Pencil
+  Copy, Download, FileText, FilePlus, FolderInput, Share2, Trash2, Pencil
 } from 'lucide-react';
 import type { TreeNode } from '../types';
 
-export type PageAction = 'rename' | 'move' | 'copy' | 'share' | 'export' | 'delete';
+export type PageAction = 'rename' | 'move' | 'copy' | 'share' | 'export' | 'delete' | 'createChild';
 
 /**
  * Floating page action menu (Phase 6 — task 3).
@@ -59,6 +59,7 @@ export function PageActionMenu({
 
   return (
     <div ref={ref} className="ctx-menu" style={{ left, top }} role="menu">
+      {item('createChild', <FilePlus size={14} />, '创建子页面')}
       {item('rename', <Pencil size={14} />, '重命名')}
       {item('move', <FolderInput size={14} />, '移动到')}
       {item('copy', <Copy size={14} />, '复制')}

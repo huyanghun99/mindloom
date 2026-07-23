@@ -1,3 +1,5 @@
+import { logger } from './logger';
+
 /**
  * In-memory job metrics + structured failure logging.
  *
@@ -41,7 +43,7 @@ export function recordSuccess(type: string): void {
 
 export function recordSkipped(reason: string): void {
   metrics.skipped++;
-  console.log(`[job] skipped: ${reason}`);
+  logger.info('job skipped', { reason });
 }
 
 export function recordFailure(
@@ -59,9 +61,7 @@ export function recordFailure(
     at: new Date().toISOString()
   };
   // Structured failure log with enough context to debug without PII.
-  console.error(
-    `[job] FAILED id=${job.id} type=${job.type} attempts=${job.attempts} :: ${message}`
-  );
+  logger.error('job failed', { jobId: job.id, type: job.type, attempts: job.attempts, err: message });
 }
 
 export function getJobMetrics(): JobMetrics {

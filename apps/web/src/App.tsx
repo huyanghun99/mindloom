@@ -6,6 +6,7 @@ import { AuthPanel } from './features/auth/AuthPanel';
 import { ShareView } from './ShareView';
 import { ShellLayout } from './features/shell/ShellLayout';
 import type { User } from './types';
+import { AiAssistant } from './features/shell/AiAssistant';
 
 function AuthedApp() {
   const { data: me, isLoading } = useQuery<{ user: User }>({

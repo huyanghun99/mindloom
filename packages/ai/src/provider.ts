@@ -3,12 +3,30 @@ export interface AiMessage {
   content: string;
 }
 
+export interface AiUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 export interface AiProvider {
   generateText(messages: AiMessage[]): Promise<string>;
   streamText(messages: AiMessage[]): AsyncGenerator<string>;
   embed(text: string): Promise<number[]>;
   /** Batch embedding. Default implementation falls back to per-item `embed`. */
   embedBatch(texts: string[]): Promise<number[][]>;
+  /**
+   * Phase H (N2): the embedding model name used by this provider, so callers
+   * can build model-aware cache keys. MockAiProvider returns 'mock-embedding'.
+   */
+  readonly embeddingModel?: string;
+  /**
+   * Phase H (N2): usage from the most recent generateText call, if the
+   * upstream returned one. Used by the job worker to persist
+   * actualPromptTokens / actualCompletionTokens for cost observability.
+   * Returns null when the provider does not report usage (mock, or upstream
+   * omitted the field).
+   */
+  getLastUsage?(): AiUsage | null;
 }
 
 export const DEFAULT_EMBEDDING_DIMENSION = 1536;
@@ -34,6 +52,8 @@ export function deterministicVector(text: string, dimension: number = DEFAULT_EM
  * (per project constraint: no real LLM calls in CI).
  */
 export class MockAiProvider implements AiProvider {
+  readonly embeddingModel: string = 'mock-embedding';
+
   constructor(private readonly dimension: number = DEFAULT_EMBEDDING_DIMENSION) {}
 
   async generateText(messages: AiMessage[]): Promise<string> {
@@ -73,32 +93,94 @@ export interface OpenAICompatibleOptions {
  * The embedding endpoint may differ from the completion endpoint, which is why
  * `embeddingBaseUrl` / `embeddingApiKey` are separate from the chat settings.
  */
+/**
+ * fetch with a hard timeout and one transient retry.
+ *
+ * Why: a bare `fetch` to an OpenAI-compatible upstream can hang forever when
+ * the upstream is degraded, pinning the calling job until the zombie reaper
+ * kicks in (and then re-enqueuing into a live-lock). The timeout aborts the
+ * whole request (including a streaming body) once the deadline passes; the
+ * single retry covers transient 5xx / 429 / network blips.
+ *
+ * 4xx is NEVER retried — auth / bad-request failures will not succeed on retry.
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  options: { timeoutMs: number; retries?: number }
+): Promise<Response> {
+  const retries = options.retries ?? 1;
+  for (let attempt = 0; ; attempt++) {
+    // AbortSignal.timeout is available on Node 18+ / modern browsers and
+    // aborts the fetch (incl. the streaming body) once the deadline passes.
+    const signal = AbortSignal.timeout(options.timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal });
+      // Retry only transient failures: 5xx (server) and 429 (rate limit).
+      if ((res.status >= 500 || res.status === 429) && attempt < retries) {
+        await sleep(500 * 2 ** attempt); // 500ms, then 1s
+        continue;
+      }
+      return res;
+    } catch (err) {
+      // Network error or timeout abort -> retry once before surfacing.
+      if (attempt < retries) {
+        await sleep(500 * 2 ** attempt);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class OpenAICompatibleProvider implements AiProvider {
-  constructor(private readonly opts: OpenAICompatibleOptions) {}
+  private lastUsage: AiUsage | null = null;
+  readonly embeddingModel: string;
+
+  constructor(private readonly opts: OpenAICompatibleOptions) {
+    this.embeddingModel = opts.embeddingModel;
+  }
+
+  getLastUsage(): AiUsage | null {
+    return this.lastUsage;
+  }
 
   private headers(apiKey: string): Record<string, string> {
     return { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` };
   }
 
   async generateText(messages: AiMessage[]): Promise<string> {
-    const res = await fetch(`${this.opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: this.headers(this.opts.apiKey),
-      body: JSON.stringify({ model: this.opts.completionModel, messages, temperature: 0.3 })
-    });
+    const res = await fetchWithRetry(
+      `${this.opts.baseUrl.replace(/\/$/, '')}/chat/completions`,
+      { method: 'POST', headers: this.headers(this.opts.apiKey), body: JSON.stringify({ model: this.opts.completionModel, messages, temperature: 0.3 }) },
+      { timeoutMs: 30_000 }
+    );
     if (!res.ok) {
       throw new Error(`LLM 请求失败 (${res.status}): ${await res.text().catch(() => res.statusText)}`);
     }
     const data = await res.json();
+    // Phase H (N2): capture usage from the upstream response so the job worker
+    // can persist actualPromptTokens / actualCompletionTokens. Most OpenAI-
+    // compatible APIs return { usage: { prompt_tokens, completion_tokens } }.
+    const u = data?.usage;
+    if (u && typeof u.prompt_tokens === 'number' && typeof u.completion_tokens === 'number') {
+      this.lastUsage = { promptTokens: u.prompt_tokens, completionTokens: u.completion_tokens };
+    } else {
+      this.lastUsage = null;
+    }
     return data?.choices?.[0]?.message?.content ?? '';
   }
 
   async *streamText(messages: AiMessage[]): AsyncGenerator<string> {
-    const res = await fetch(`${this.opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: this.headers(this.opts.apiKey),
-      body: JSON.stringify({ model: this.opts.completionModel, messages, temperature: 0.3, stream: true })
-    });
+    const res = await fetchWithRetry(
+      `${this.opts.baseUrl.replace(/\/$/, '')}/chat/completions`,
+      { method: 'POST', headers: this.headers(this.opts.apiKey), body: JSON.stringify({ model: this.opts.completionModel, messages, temperature: 0.3, stream: true }) },
+      { timeoutMs: 30_000 }
+    );
     if (!res.ok) {
       throw new Error(`LLM 流式请求失败 (${res.status}): ${await res.text().catch(() => res.statusText)}`);
     }
@@ -128,18 +210,11 @@ export class OpenAICompatibleProvider implements AiProvider {
   }
 
   async embed(text: string): Promise<number[]> {
-    const res = await fetch(`${this.opts.embeddingBaseUrl.replace(/\/$/, '')}/embeddings`, {
-      method: 'POST',
-      headers: this.headers(this.opts.embeddingApiKey),
-      body: JSON.stringify({
-        model: this.opts.embeddingModel,
-        input: text,
-        dimensions: this.opts.embeddingDimension,
-        // Required by several OpenAI-compatible gateways (e.g. ModelScope
-        // Qwen embeddings); harmless for providers that ignore it.
-        encoding_format: 'float'
-      })
-    });
+    const res = await fetchWithRetry(
+      `${this.opts.embeddingBaseUrl.replace(/\/$/, '')}/embeddings`,
+      { method: 'POST', headers: this.headers(this.opts.embeddingApiKey), body: JSON.stringify({ model: this.opts.embeddingModel, input: text, dimensions: this.opts.embeddingDimension, encoding_format: 'float' }) },
+      { timeoutMs: 60_000 }
+    );
     if (!res.ok) {
       throw new Error(`向量化请求失败 (${res.status}): ${await res.text().catch(() => res.statusText)}`);
     }
@@ -153,16 +228,11 @@ export class OpenAICompatibleProvider implements AiProvider {
 
   async embedBatch(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-    const res = await fetch(`${this.opts.embeddingBaseUrl.replace(/\/$/, '')}/embeddings`, {
-      method: 'POST',
-      headers: this.headers(this.opts.embeddingApiKey),
-      body: JSON.stringify({
-        model: this.opts.embeddingModel,
-        input: texts,
-        dimensions: this.opts.embeddingDimension,
-        encoding_format: 'float'
-      })
-    });
+    const res = await fetchWithRetry(
+      `${this.opts.embeddingBaseUrl.replace(/\/$/, '')}/embeddings`,
+      { method: 'POST', headers: this.headers(this.opts.embeddingApiKey), body: JSON.stringify({ model: this.opts.embeddingModel, input: texts, dimensions: this.opts.embeddingDimension, encoding_format: 'float' }) },
+      { timeoutMs: 60_000 }
+    );
     if (!res.ok) {
       throw new Error(`批量向量化请求失败 (${res.status}): ${await res.text().catch(() => res.statusText)}`);
     }

@@ -1,10 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import { type NodeViewProps } from '@tiptap/react';
-import mermaid from 'mermaid';
 import { Pencil } from 'lucide-react';
 import { BlockFrame } from './BlockFrame';
 
-mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose', fontFamily: 'inherit' });
+// Phase J (S8): Mermaid is ~700KB minified. Load it lazily on first render of
+// a mermaid block instead of at module init, so pages without diagrams never
+// pay the cost. The import + initialize is guarded so it runs at most once.
+type MermaidLib = typeof import('mermaid')['default'];
+let mermaidPromise: Promise<MermaidLib> | null = null;
+function loadMermaid(): Promise<MermaidLib> {
+  if (!mermaidPromise) {
+    mermaidPromise = import('mermaid').then((m) => {
+      const lib = m.default;
+      lib.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose', fontFamily: 'inherit' });
+      return lib;
+    });
+  }
+  return mermaidPromise;
+}
 
 let idSeq = 0;
 
@@ -24,8 +37,10 @@ export function MermaidView({ node, updateAttributes, selected, deleteNode }: No
       setError('');
       return;
     }
-    mermaid
-      .render(renderId.current, src)
+    // Lazy-load mermaid, then render. While loading, the placeholder
+    // ("渲染中…") stays visible — same UX as before, just deferred I/O.
+    loadMermaid()
+      .then((mermaid) => mermaid.render(renderId.current, src))
       .then(
         (res) => {
           if (!cancelled) {

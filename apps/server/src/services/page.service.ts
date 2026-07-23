@@ -28,6 +28,7 @@ export interface CreatePageInput {
   spaceId: string;
   parentPageId?: string | null;
   title: string;
+  icon?: string | null;
   contentJson?: unknown;
   textContent?: string;
 }
@@ -68,6 +69,7 @@ export async function createPage(
     spaceId: space.id,
     parentPageId: input.parentPageId ?? null,
     title: input.title,
+    icon: input.icon ?? null,
     contentJson,
     textContent,
     ftsTokens: tokenizeChineseFriendly(`${input.title}\n${textContent}`),
@@ -105,6 +107,7 @@ export async function updatePage(
     autosave?: boolean;
     parentPageId?: string | null;
     position?: number;
+    icon?: string | null;
   }
 ): Promise<UpdateResult> {
   const current = await repo.getPageDetail(pageId);
@@ -151,6 +154,7 @@ export async function updatePage(
         .update(pages)
         .set({
           title: input.title ?? current.title,
+          icon: input.icon !== undefined ? input.icon : current.icon,
           contentJson: nextContentJson,
           textContent: nextText,
           ftsTokens: tokenizeChineseFriendly(`${input.title ?? current.title}\n${nextText}`),
