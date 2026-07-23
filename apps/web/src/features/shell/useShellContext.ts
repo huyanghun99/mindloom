@@ -48,6 +48,7 @@ export function activeRouteFromPath(pathname: string): MainRoute {
   if (/^\/ask\//.test(pathname)) return 'ask';
   if (/^\/map\//.test(pathname)) return 'map';
   if (pathname === '/search') return 'search';
+  if (pathname === '/archive') return 'archive';
   if (/^\/p\//.test(pathname)) return 'page';
   return 'home';
 }

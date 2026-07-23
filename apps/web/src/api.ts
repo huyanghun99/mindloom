@@ -38,6 +38,10 @@ export function post<T>(path: string, body: unknown): Promise<T> {
   return api<T>(path, { method: 'POST', body: JSON.stringify(body) });
 }
 
+export function get<T>(path: string): Promise<T> {
+  return api<T>(path, { method: 'GET' });
+}
+
 export function put<T>(path: string, body: unknown): Promise<T> {
   return api<T>(path, { method: 'PUT', body: JSON.stringify(body) });
 }
@@ -142,10 +146,28 @@ export function dismissCandidate(id: string): Promise<{ ok: boolean }> {
   return post(`/api/llm-wiki/candidates/${id}/dismiss`, {});
 }
 
-/* ----------------------------------- consolidation (Phase 3) ------------- */
+/* ----------------------------------- consolidation (Phase 3 / B1.3) ------ */
 
-export function consolidateSpace(spaceId: string): Promise<{ ok: boolean; createdTopics: number; mergeSuggestions: number }> {
+// Phase B (B1.3): clustering is asynchronous. The endpoint enqueues a
+// `space.consolidate_topic_candidates` job and returns its id; poll `getJob`
+// for progress, then refresh topics once it succeeds.
+export function consolidateSpace(spaceId: string): Promise<{ ok: boolean; jobId: string }> {
   return post(`/api/llm-wiki/spaces/${spaceId}/consolidate`, {});
+}
+
+export interface JobStatus {
+  id: string;
+  type: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  progress: { done?: number; total?: number; stage?: string };
+  entityId: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function getJob(jobId: string): Promise<JobStatus> {
+  return get(`/api/jobs/${jobId}`);
 }
 
 /* ----------------------------------- Phase 4: refresh / merge / split ------- */
@@ -217,6 +239,24 @@ export function reactivateTopic(topicId: string): Promise<{ topic: unknown }> {
   return post(`/api/llm-wiki/topics/${topicId}/reactivate`, {});
 }
 
+/** Phase B (B2.3): soft-delete a Topic (archived with reason 'deleted'). */
+export function deleteTopic(topicId: string): Promise<{ ok: boolean }> {
+  return del(`/api/llm-wiki/topics/${topicId}`);
+}
+
+/** Phase B (B2.1): edit a Topic — rename, edit body, pin, or set lifecycle. */
+export function updateTopic(
+  topicId: string,
+  body: { title?: string; contentJson?: unknown; pinned?: boolean; lifecycleStatus?: string }
+): Promise<{ topic: unknown }> {
+  return patch(`/api/llm-wiki/topics/${topicId}`, body);
+}
+
+/** Phase B (B2.1): toggle pin on a Topic. */
+export function pinTopic(topicId: string, pinned: boolean): Promise<{ topic: unknown }> {
+  return updateTopic(topicId, { pinned });
+}
+
 /** Run the lifecycle evaluation job for a Space (or whole workspace). */
 export function evaluateLifecycle(body: { workspaceId?: string; spaceId?: string }): Promise<{ ok: boolean; suggestions: LifecycleSuggestion[] }> {
   return post(`/api/llm-wiki/lifecycle/evaluate`, body);
@@ -225,6 +265,27 @@ export function evaluateLifecycle(body: { workspaceId?: string; spaceId?: string
 /** List pending lifecycle Suggestions for a Space. */
 export function getLifecycleSuggestions(spaceId: string): Promise<{ suggestions: LifecycleSuggestion[] }> {
   return api(`/api/llm-wiki/lifecycle/suggestions?spaceId=${spaceId}`);
+}
+
+/* ----------------------------------- Phase B3: archive center ------------------- */
+
+import type { Space } from './types';
+
+/** Update a Space (rename / set lifecycle / kind). */
+export function updateSpace(spaceId: string, body: { name?: string; lifecycleStatus?: string; spaceKind?: string }): Promise<{ space: Space }> {
+  return patch(`/api/spaces/${spaceId}`, body);
+}
+/** Dismiss a lifecycle (or any) suggestion — sets status='ignored'. */
+export function ignoreSuggestion(id: string): Promise<{ suggestion: WikiSuggestion }> {
+  return post(`/api/llm-wiki/suggestions/${id}/ignore`, {});
+}
+/** B3.3: list archived Topics for a Space (soft-deleted / archived). */
+export function getArchivedTopics(spaceId: string): Promise<{ topics: unknown[] }> {
+  return api(`/api/llm-wiki/topics?spaceId=${spaceId}&lifecycle=archived`);
+}
+/** B3.3: list archived Spaces for a Workspace. */
+export function getArchivedSpaces(workspaceId: string): Promise<{ spaces: Space[] }> {
+  return api(`/api/spaces?workspaceId=${workspaceId}&lifecycle=archived`);
 }
 
 /* ----------------------------------- Phase 6: closure / promotion --------- */

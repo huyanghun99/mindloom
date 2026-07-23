@@ -16,6 +16,8 @@ import {
   undoTopicOperation,
   indexTopicForSearch
 } from '../services/wiki.service';
+import { createAiProviderForContext } from '../services/ai.service';
+import type { AiProvider } from '@mindloom/ai';
 import type { TopicSynthesis } from '@mindloom/shared';
 
 // Use the deterministic MockAiProvider for every AI call so the suite runs
@@ -173,7 +175,7 @@ describe('Phase 4 — refresh, merge, split', () => {
       .values({
         workspaceId: ws.id, spaceId: sp.id, title: 'Survivor',
         contentJson: survivorSynth as unknown, textContent: 's', status: 'accepted',
-        source: 'ai_generated', publicationStatus: 'accepted', freshnessStatus: 'fresh', lifecycleStatus: 'active'
+        source: 'ai_generated', publicationStatus: 'accepted', freshnessStatus: 'fresh', lifecycleStatus: 'active', createdById: user.id
       })
       .returning();
     const mergedSynth = makeSynthesis(['Merged']);
@@ -182,7 +184,7 @@ describe('Phase 4 — refresh, merge, split', () => {
       .values({
         workspaceId: ws.id, spaceId: sp.id, title: 'Merged',
         contentJson: mergedSynth as unknown, textContent: 'm', status: 'accepted',
-        source: 'ai_generated', publicationStatus: 'accepted', freshnessStatus: 'fresh', lifecycleStatus: 'active'
+        source: 'ai_generated', publicationStatus: 'accepted', freshnessStatus: 'fresh', lifecycleStatus: 'active', createdById: user.id
       })
       .returning();
 
@@ -231,5 +233,111 @@ describe('Phase 4 — refresh, merge, split', () => {
     // The operation is marked undone.
     const [opAfter] = await db.select().from(topicOperations).where(sql`id = ${operationId}`).limit(1);
     expect(opAfter.undoneAt).not.toBeNull();
+  });
+
+  /* ---- Gate 4: 合并在事务中提交，reindex 失败不回滚数据 (merge is atomic) ---- */
+  it('commits the merge even when re-indexing fails (sources moved + operation recorded)', async () => {
+    const user = await makeUser();
+    const ws = await makeWorkspace(user);
+    const sp = await makeSpace(ws, user);
+
+    const survivorSynth = makeSynthesis(['Survivor']);
+    const [survivor] = await db
+      .insert(wikiTopics)
+      .values({
+        workspaceId: ws.id, spaceId: sp.id, title: 'Survivor',
+        contentJson: survivorSynth as unknown, textContent: 's', status: 'accepted',
+        source: 'ai_generated', publicationStatus: 'accepted', freshnessStatus: 'fresh', lifecycleStatus: 'active', createdById: user.id
+      })
+      .returning();
+    const mergedSynth = makeSynthesis(['Merged']);
+    const [merged] = await db
+      .insert(wikiTopics)
+      .values({
+        workspaceId: ws.id, spaceId: sp.id, title: 'Merged',
+        contentJson: mergedSynth as unknown, textContent: 'm', status: 'accepted',
+        source: 'ai_generated', publicationStatus: 'accepted', freshnessStatus: 'fresh', lifecycleStatus: 'active', createdById: user.id
+      })
+      .returning();
+
+    // Give the merged topic a source + a RAG chunk that the merge must move.
+    // pageId must be a real (existing) page UUID to satisfy the FK.
+    const srcPage = await processPage(user, sp.id, 'Src page', '# Src\nSource content for the merge.');
+    await db.insert(topicSources).values({ topicId: merged.id, pageId: srcPage, addedBy: 'ai', contributionType: 'key_point' });
+    await db.insert(documentChunks).values({
+      workspaceId: ws.id, spaceId: sp.id, pageId: null, topicId: merged.id,
+      chunkIndex: 0, title: merged.title, content: 'old chunk', ftsTokens: 'old',
+      embedding: new Array(1536).fill(0), embeddingModel: 'mock-embedding', embeddingDimension: 1536
+    });
+
+    // Force the merge's re-index (createAiProviderForContext) to throw on embed.
+    const failingProvider = {
+      generateText: async () => 'x',
+      streamText: async function* () {},
+      embed: async () => { throw new Error('embed boom'); },
+      embedBatch: async () => { throw new Error('embed boom'); }
+    } as unknown as AiProvider;
+    vi.mocked(createAiProviderForContext).mockImplementationOnce(async () => failingProvider);
+
+    const { operationId } = await mergeTopics(survivor.id, merged.id, user.id);
+
+    // Merge still committed despite re-index failure (Gate: 合并可完整回滚/提交).
+    const [m] = await db.select().from(wikiTopics).where(sql`id = ${merged.id}`).limit(1);
+    expect(m.mergedIntoTopicId).toBe(survivor.id);
+    expect(m.lifecycleStatus).toBe('archived');
+
+    // Provenance moved to the survivor.
+    const survivorSources = await db.select().from(topicSources).where(sql`topic_id = ${survivor.id}`);
+    expect(survivorSources).toHaveLength(1);
+    const mergedSources = await db.select().from(topicSources).where(sql`topic_id = ${merged.id}`);
+    expect(mergedSources).toHaveLength(0);
+
+    // RAG chunk re-pointed to the survivor.
+    const survivorChunks = await db.select().from(documentChunks).where(sql`topic_id = ${survivor.id}::uuid`);
+    expect(survivorChunks).toHaveLength(1);
+
+    // Audit record persisted.
+    const [op] = await db.select().from(topicOperations).where(sql`id = ${operationId}`).limit(1);
+    expect(op.operationType).toBe('merge');
+  });
+
+  /* ---- Gate 5: 索引更新失败不丢旧数据 (index failure keeps old chunks) ---- */
+  it('keeps the existing index when embedding fails (old chunks retained)', async () => {
+    const user = await makeUser();
+    const ws = await makeWorkspace(user);
+    const sp = await makeSpace(ws, user);
+    const [topic] = await db
+      .insert(wikiTopics)
+      .values({
+        workspaceId: ws.id, spaceId: sp.id, title: 'Kept',
+        contentJson: makeSynthesis(['A']) as unknown, textContent: 't', status: 'accepted',
+        source: 'ai_generated', publicationStatus: 'accepted', freshnessStatus: 'fresh', lifecycleStatus: 'active', createdById: user.id
+      })
+      .returning();
+
+    // Pre-existing RAG chunk (the "old" index).
+    await db.insert(documentChunks).values({
+      workspaceId: ws.id, spaceId: sp.id, pageId: null, topicId: topic.id,
+      chunkIndex: 0, title: 'Kept', content: 'old index', ftsTokens: 'old',
+      embedding: new Array(1536).fill(0), embeddingModel: 'mock-embedding', embeddingDimension: 1536
+    });
+    const before = await db.select().from(documentChunks).where(sql`topic_id = ${topic.id}::uuid`);
+    expect(before).toHaveLength(1);
+
+    // Embed throws before any DELETE runs, so the old chunk must survive.
+    const failingProvider = {
+      generateText: async () => 'x',
+      streamText: async function* () {},
+      embed: async () => { throw new Error('embed boom'); },
+      embedBatch: async () => { throw new Error('embed boom'); }
+    } as unknown as AiProvider;
+
+    await expect(
+      indexTopicForSearch({ id: topic.id, workspaceId: ws.id, spaceId: sp.id, title: 'Kept' }, makeSynthesis(['A']), failingProvider)
+    ).rejects.toThrow('embed boom');
+
+    const after = await db.select().from(documentChunks).where(sql`topic_id = ${topic.id}::uuid`);
+    expect(after).toHaveLength(1);
+    expect(after[0].content).toBe('old index');
   });
 });

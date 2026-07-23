@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Check, ChevronRight, Download, Loader2, MoreHorizontal,
@@ -7,19 +7,40 @@ import {
 import { useEditorStatus } from './editorStatus';
 import { SaveIndicator } from './SaveIndicator';
 import { urls } from '../../nav';
-import type { MainRoute, Space, Workspace } from '../../types';
+import type { MainRoute, Space, TreeNode, Workspace } from '../../types';
 
 const ROUTE_LABEL: Record<MainRoute, string> = {
-  home: '首页', page: '', organize: '智能整理', search: '搜索', ask: '知识问答', map: '关系图'
+  home: '首页', page: '', organize: '智能整理', search: '搜索', ask: '知识问答', map: '关系图', archive: '归档中心'
 };
 
-export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalette }: {
+// Phase C2.2 (U8): build the ancestor chain for a page from the full tree so the
+// breadcrumb reflects the real parent > child hierarchy (the REST API only
+// returns a single `parentPageId`, so we walk the in-memory tree instead of
+// adding a backend endpoint).
+function buildCrumbChain(tree: TreeNode[] | undefined, pageId: string | null): TreeNode[] {
+  if (!tree || !pageId) return [];
+  const byId = new Map<string, TreeNode>();
+  const walk = (nodes: TreeNode[]) => { for (const n of nodes) { byId.set(n.id, n); walk(n.children); } };
+  walk(tree);
+  const chain: TreeNode[] = [];
+  const seen = new Set<string>();
+  let cur = byId.get(pageId);
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    chain.unshift(cur);
+    cur = cur.parentPageId ? byId.get(cur.parentPageId) : undefined;
+  }
+  return chain;
+}
+
+export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalette, tree }: {
   workspace: Workspace | null;
   space: Space | null;
   route: MainRoute;
   pageId: string | null;
   pageTitle?: string | null;
   onOpenPalette: () => void;
+  tree?: TreeNode[];
 }) {
   const navigate = useNavigate();
   const { status } = useEditorStatus();
@@ -42,6 +63,12 @@ export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalet
 
   const crumbTail = route === 'page' ? (pageTitle || status.pageTitle || '未命名笔记') : ROUTE_LABEL[route];
 
+  // Phase C2.2 (U8): ancestor chain for the current page, drawn from the tree.
+  const crumbChain = useMemo(
+    () => (route === 'page' && pageId ? buildCrumbChain(tree, pageId) : []),
+    [route, pageId, tree]
+  );
+
   return (
     <header className="topbar">
       <div className="crumbs">
@@ -56,8 +83,25 @@ export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalet
           </>
         )}
 
-        {/* Page (or route) — clickable when on a page */}
-        {crumbTail && (
+        {/* Page hierarchy — when we have a tree, render the full ancestor chain */}
+        {route === 'page' && pageId && crumbChain.length > 0 ? (
+          crumbChain.map((node, i) => {
+            const isLast = i === crumbChain.length - 1;
+            const label = node.title || '未命名笔记';
+            return (
+              <Fragment key={node.id}>
+                <ChevronRight size={13} className="crumb-sep" />
+                {isLast ? (
+                  <span className="crumb-current" title={label}>{label}</span>
+                ) : (
+                  <button className="crumb-link" title={label} onClick={() => navigate(urls.page(node.id))}>
+                    {label}
+                  </button>
+                )}
+              </Fragment>
+            );
+          })
+        ) : crumbTail ? (
           <>
             <ChevronRight size={13} className="crumb-sep" />
             {route === 'page' && pageId ? (
@@ -68,7 +112,7 @@ export function TopBar({ workspace, space, route, pageId, pageTitle, onOpenPalet
               <span className="crumb-current">{crumbTail}</span>
             )}
           </>
-        )}
+        ) : null}
       </div>
 
       <button className="palette-trigger" onClick={onOpenPalette}>

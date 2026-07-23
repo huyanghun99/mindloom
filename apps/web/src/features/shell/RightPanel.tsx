@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Brain, Check, Link2, ListTree, Loader2, PanelRightClose, RefreshCw, Send, Tag as TagIcon, X } from 'lucide-react';
 import { api, post, streamRag, getAiProfile, getPageSuggestions, undoSuggestion, updatePageTags } from '../../api';
 import { setPendingScroll } from '../../editor/scrollTo';
 import type { AiProfile } from '@mindloom/shared';
 import { type PMNode } from '../../editor/prosemirror';
-import { extractOutline } from '../notes/outline';
+import { extractOutline, type OutlineItem } from '../notes/outline';
 import { EmptyState } from '../../components/EmptyState';
 import { SkeletonList } from '../../components/Skeleton';
 import { useToast } from '../../components/Toast';
@@ -14,10 +14,19 @@ import type { PageDetail, Space, Workspace, WikiSuggestion } from '../../types';
 
 type Tab = 'summary' | 'tags' | 'related' | 'outline';
 
-function scrollToHeading(index: number) {
-  const nodes = document.querySelectorAll('.editor-content h1, .editor-content h2, .editor-content h3, .editor-content h4, .editor-content h5, .editor-content h6');
-  const el = nodes[index] as HTMLElement | undefined;
+function scrollToHeading(outline: OutlineItem[], index: number) {
+  const id = outline[index]?.id;
+  const el = (id ? document.getElementById(id) : null)
+    ?? (document.querySelectorAll('.editor-content h1, .editor-content h2, .editor-content h3, .editor-content h4, .editor-content h5, .editor-content h6')[index] as HTMLElement | undefined);
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// Phase C2.5 (U12): give each rendered heading a stable id so outline clicks
+// jump by id (duplicate titles no longer collide on positional matching).
+const HEADING_SEL = '.editor-content h1, .editor-content h2, .editor-content h3, .editor-content h4, .editor-content h5, .editor-content h6';
+function syncHeadingIds(outline: OutlineItem[]) {
+  const headings = Array.from(document.querySelectorAll(HEADING_SEL)) as HTMLElement[];
+  headings.forEach((h, i) => { if (outline[i]) h.id = outline[i].id; });
 }
 
 export function RightPanel({ workspace, space, pageId, onOpenPage, onClose }: {
@@ -65,6 +74,13 @@ export function RightPanel({ workspace, space, pageId, onOpenPage, onClose }: {
     return () => obs.disconnect();
   }, [tab, outline, pageId]);
 
+  // Phase C2.5 (U12): stamp stable ids onto rendered headings whenever the
+  // outline (or page) changes, so outline clicks can scroll by id.
+  useLayoutEffect(() => {
+    if (tab !== 'outline') return;
+    syncHeadingIds(outline);
+  }, [tab, outline, pageId]);
+
   const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
     { key: 'summary', label: 'AI 摘要', icon: <Brain size={15} /> },
     { key: 'tags', label: '标签', icon: <TagIcon size={15} /> },
@@ -99,7 +115,7 @@ export function RightPanel({ workspace, space, pageId, onOpenPage, onClose }: {
                   <button
                     key={h.id}
                     className={`rp-outline-item lvl-${h.level}${h.index === activeIdx ? ' active' : ''}`}
-                    onClick={() => { setActiveIdx(h.index); scrollToHeading(h.index); }}
+                    onClick={() => { setActiveIdx(h.index); scrollToHeading(outline, h.index); }}
                   >
                     {h.text}
                   </button>
@@ -155,6 +171,19 @@ function SummaryTab({ workspace, space, pageId, onOpenPage }: {
   const [recentlyAccepted, setRecentlyAccepted] = useState<{ id: string; label: string }[]>([]);
   const [highSugg, setHighSugg] = useState<WikiSuggestion | null>(null);
 
+  // Phase C1 (U7): make the auto-apply of low-risk (tag) suggestions a
+  // user-controllable, persisted preference instead of an always-on side effect
+  // (previously a bare useEffect with no opt-out). Default on to preserve prior
+  // behaviour; the explicit "批量接受低风险" button remains for manual control.
+  const [autoApplyLow, setAutoApplyLow] = useState<boolean>(() => {
+    try { return localStorage.getItem('ml.autoApplyLowRiskTags') !== '0'; } catch { return true; }
+  });
+  const toggleAutoApply = () => {
+    const next = !autoApplyLow;
+    setAutoApplyLow(next);
+    try { localStorage.setItem('ml.autoApplyLowRiskTags', next ? '1' : '0'); } catch { /* ignore */ }
+  };
+
   const accept = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/accept`, {}),
     onSuccess: (_r, id) => {
@@ -175,10 +204,12 @@ function SummaryTab({ workspace, space, pageId, onOpenPage }: {
     }
   });
 
-  // Low-risk (tag) suggestions are applied automatically, but transparently:
-  // each one fires a toast so the user always knows what changed.
+  // Low-risk (tag) suggestions are applied automatically when the user's
+  // preference is on, but transparently: each one fires a toast so the user
+  // always knows what changed. Gated by the persisted `autoApplyLow` toggle.
   const autoHandled = useRef<Set<string>>(new Set());
   useEffect(() => {
+    if (!autoApplyLow) return;
     for (const s of suggestions) {
       if (s.risk === 'low' && !autoHandled.current.has(s.id)) {
         autoHandled.current.add(s.id);
@@ -189,7 +220,7 @@ function SummaryTab({ workspace, space, pageId, onOpenPage }: {
         toast.info(`已自动添加标签：${label}`);
       }
     }
-  }, [suggestions, accept, toast]);
+  }, [suggestions, accept, toast, autoApplyLow]);
 
   // 问当前页面（流式 SSE）
   const [q, setQ] = useState('');
@@ -237,7 +268,13 @@ function SummaryTab({ workspace, space, pageId, onOpenPage }: {
       </section>
 
       <section className="rp-section">
-        <h4 className="rp-section-title">本页 AI 建议</h4>
+        <div className="rp-section-head-row">
+          <h4 className="rp-section-title">本页 AI 建议</h4>
+          <label className="auto-toggle" title="自动采纳低风险标签建议">
+            <input type="checkbox" checked={autoApplyLow} onChange={toggleAutoApply} />
+            自动采纳低风险
+          </label>
+        </div>
         {suggestions.length === 0 && recentlyAccepted.length === 0 && (
           <p className="muted small">AI 整理本页后，会在此给出可审阅的主题与关联建议。</p>
         )}

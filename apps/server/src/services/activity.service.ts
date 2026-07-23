@@ -1,5 +1,6 @@
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/client';
+import { knowledgeActivityStats } from '@mindloom/db';
 
 export type ActivityEntityType = 'topic' | 'page';
 export type ActivityEventType =
@@ -21,26 +22,6 @@ export interface RecordActivityInput {
   metadata?: Record<string, unknown>;
   /** Override the occurrence time (used by tests to simulate historical events). */
   occurredAt?: Date;
-}
-
-// Maps an event type to the "last*At" timestamp column(s) it refreshes.
-function lastAtColumnsFor(eventType: ActivityEventType): string[] {
-  switch (eventType) {
-    case 'edit':
-      return ['last_edited_at'];
-    case 'view':
-    case 'citation_open':
-      return ['last_viewed_at'];
-    case 'search_click':
-      return ['last_viewed_at', 'last_retrieved_at'];
-    case 'rag_citation':
-      return ['last_retrieved_at'];
-    case 'added_to_source':
-    case 'project_reference':
-      return ['last_linked_at'];
-    default:
-      return [];
-  }
 }
 
 /**
@@ -97,7 +78,7 @@ async function upsertStats(
     INSERT INTO knowledge_activity_stats(
       workspace_id, space_id, entity_type, entity_id,
       last_edited_at, last_viewed_at, last_retrieved_at, last_linked_at, last_meaningful_activity_at,
-      views30d, citations30d, rag_citations30d, active_users30d, activity_score, calculated_at
+      views_30d, citations_30d, rag_citations_30d, active_users_30d, activity_score, calculated_at
     )
     VALUES (
       ${workspaceId}, ${spaceId}, ${entityType}, ${entityId},
@@ -112,10 +93,10 @@ async function upsertStats(
       last_retrieved_at = EXCLUDED.last_retrieved_at,
       last_linked_at = EXCLUDED.last_linked_at,
       last_meaningful_activity_at = EXCLUDED.last_meaningful_activity_at,
-      views30d = EXCLUDED.views30d,
-      citations30d = EXCLUDED.citations30d,
-      rag_citations30d = EXCLUDED.rag_citations30d,
-      active_users30d = EXCLUDED.active_users30d,
+      views_30d = EXCLUDED.views_30d,
+      citations_30d = EXCLUDED.citations_30d,
+      rag_citations_30d = EXCLUDED.rag_citations_30d,
+      active_users_30d = EXCLUDED.active_users_30d,
       activity_score = EXCLUDED.activity_score,
       calculated_at = now(),
       space_id = EXCLUDED.space_id
@@ -127,10 +108,20 @@ export async function getActivityStats(
   entityType: ActivityEntityType,
   entityId: string
 ): Promise<Record<string, unknown> | null> {
-  const rows = await db.execute<any>(sql`
-    SELECT * FROM knowledge_activity_stats WHERE entity_type = ${entityType} AND entity_id = ${entityId} LIMIT 1
-  `);
-  return rows.rows[0] ?? null;
+  // Use the Drizzle query builder so results come back with the camelCase field
+  // names defined by the schema (e.g. views30d, lastRetrievedAt), matching the
+  // API contract consumed by the web client (apps/web/src/types.ts).
+  const rows = await db
+    .select()
+    .from(knowledgeActivityStats)
+    .where(
+      and(
+        eq(knowledgeActivityStats.entityType, entityType),
+        eq(knowledgeActivityStats.entityId, entityId)
+      )
+    )
+    .limit(1);
+  return (rows[0] ?? null) as Record<string, unknown> | null;
 }
 
 /** All activity events for an entity, most-recent first (audit / debugging). */

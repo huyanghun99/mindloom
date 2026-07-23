@@ -139,7 +139,13 @@ export function HomeView({ workspace, space, onSelectPage, onNavigate, onNewNote
           <div className="home-card-head"><Clock size={15} /> 最近编辑</div>
           {treeLoading && <SkeletonList rows={4} />}
           {!treeLoading && recent.length === 0 && (
-            <EmptyState icon={<FileText size={26} />} title="还没有笔记" hint="用上面的快速记录开始你的第一篇。" />
+            <div className="home-empty-cta">
+              <EmptyState icon={<FileText size={26} />} title="还没有笔记" hint="用上面的快速记录开始你的第一篇，或批量导入已有资料。" />
+              <div className="home-empty-actions">
+                <button className="primary sm" onClick={onNewNote}><FileText size={15} /> 新建笔记</button>
+                <button className="ghost sm" onClick={() => setShowImport(true)}><Upload size={15} /> 导入 Markdown</button>
+              </div>
+            </div>
           )}
           {recent.map((n) => (
             <button key={n.id} className="home-row" onClick={() => onSelectPage(n.id)}>

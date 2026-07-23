@@ -27,6 +27,7 @@ export const urls = {
     return s ? `/search?${s}` : '/search';
   },
   settings: () => '/settings',
+  archive: () => '/archive',
   home: () => '/'
 };
 
@@ -36,6 +37,8 @@ export function routeToUrl(
   workspaceId: string | undefined,
   spaceId: string | undefined
 ): string {
+  // Archive Center is a fixed, space-independent destination.
+  if (route === 'archive') return urls.archive();
   if (!workspaceId || !spaceId) return urls.home();
   switch (route) {
     case 'home':

@@ -5,11 +5,11 @@ import { createTopicSchema, updateTopicSchema } from '@mindloom/shared';
 import { authMiddleware, type AppEnv } from '../middleware/auth';
 import { db } from '../db/client';
 import { pages, wikiTopics, llmSuggestions, spaces, topicCandidates, topicOperations } from '@mindloom/db';
-import { canEditSpace, canViewSpace, canEditPage } from '../services/permission.service';
+import { canEditSpace, canViewSpace, canEditPage, canManageSpace } from '../services/permission.service';
 import { getSpacePolicy, isAiDisabledError, createAiProviderForContext } from '../services/ai.service';
 import { enqueueJob } from '../services/job-runner';
 import { confirmEdgesForSuggestion } from '../services/graph.service';
-import { undoSuggestion, promoteCandidate, dismissCandidate, consolidateCandidates, generateRefreshDiff, applyRefreshDiff, mergeTopics, splitTopic, undoTopicOperation, archiveTopic, reactivateTopic } from '../services/wiki.service';
+import { undoSuggestion, promoteCandidate, dismissCandidate, generateRefreshDiff, applyRefreshDiff, mergeTopics, splitTopic, undoTopicOperation, archiveTopic, reactivateTopic, deleteTopic } from '../services/wiki.service';
 import { recordActivity, getActivityStats, listActivityEvents } from '../services/activity.service';
 import { evaluateLifecycle, LIFECYCLE_SUGGESTION_TYPES } from '../services/lifecycle.service';
 import { generateClosurePackage, storeClosurePackage, getClosurePackage, deriveTopicToSpace } from '../services/closure.service';
@@ -164,6 +164,19 @@ llmWikiRoutes.patch('/topics/:topicId', zValidator('json', updateTopicSchema), a
     await recordActivity({ workspaceId: updated.workspaceId, spaceId: updated.spaceId, entityType: 'topic', entityId: updated.id, eventType: 'edit', userId: user.id }).catch(() => {});
   }
   return c.json({ topic: updated });
+});
+
+// Phase B (B2.3): soft-delete a Topic. Reachable only by an editor; the Topic
+// is archived with reason 'deleted' (never hard-deleted) so it stays auditable
+// and recoverable. Hidden from the default list, visible via ?lifecycle=archived.
+llmWikiRoutes.delete('/topics/:topicId', async (c) => {
+  const user = c.get('user');
+  const topicId = c.req.param('topicId');
+  const [topic] = await db.select().from(wikiTopics).where(eq(wikiTopics.id, topicId)).limit(1);
+  if (!topic) return c.json({ error: 'Not found' }, 404);
+  if (!(await canEditSpace(user.id, topic.spaceId))) return c.json({ error: 'Forbidden' }, 403);
+  await deleteTopic(topicId, user.id);
+  return c.json({ ok: true });
 });
 
 llmWikiRoutes.post('/topics/:topicId/accept', async (c) => {
@@ -513,25 +526,33 @@ llmWikiRoutes.get('/suggestions', async (c) => {
 // Phase 2 (D2): Candidate endpoints. A page only ever produces *candidates*;
 // these let the UI list and promote / dismiss them without auto-creating
 // formal Topics during page processing.
-// Phase 3 (E2): trigger Space clustering. Aggregates the space's candidates
-// into formal Topics (alias / embedding / LLM fuzzy matching). Runs inline so
-// the UI gets an immediate result; the same work is also enqueued automatically
-// after each page is indexed (see job-runner).
+// Phase B (B1.3): trigger Space clustering asynchronously. Aggregates the
+// space's candidates into formal Topics (alias / embedding / LLM fuzzy
+// matching). Instead of running inline (which could hang the HTTP connection
+// on a large Space — T3), we enqueue a `space.consolidate_topic_candidates`
+// job and return its id; the UI polls /api/jobs/:id for progress. The same job
+// is also enqueued automatically after each page is indexed (see job-runner).
 llmWikiRoutes.post('/spaces/:spaceId/consolidate', async (c) => {
   const user = c.get('user');
   const spaceId = c.req.param('spaceId');
   if (!(await canEditSpace(user.id, spaceId))) return c.json({ error: 'Forbidden' }, 403);
   const [space] = await db.select().from(spaces).where(eq(spaces.id, spaceId)).limit(1);
   if (!space) return c.json({ error: 'Not found' }, 404);
-  let ai: Awaited<ReturnType<typeof createAiProviderForContext>>;
-  try {
-    ai = await createAiProviderForContext({ workspaceId: space.workspaceId, spaceId, userId: user.id });
-  } catch (err) {
-    if (isAiDisabledError(err)) return c.json({ error: 'AI is disabled for this space' }, 400);
-    throw err;
+  // Short-circuit: a disabled space has no AI/embedding work to do.
+  if ((await getSpacePolicy(spaceId)) === 'disabled') {
+    return c.json({ error: 'AI is disabled for this space' }, 400);
   }
-  const result = await consolidateCandidates(spaceId, ai);
-  return c.json({ ok: true, ...result });
+  const { jobId } = await enqueueJob({
+    workspaceId: space.workspaceId,
+    spaceId: space.id,
+    entityType: 'space',
+    entityId: space.id,
+    type: 'space.consolidate_topic_candidates',
+    runAfterSeconds: 0,
+    priority: 200,
+    dedupeKey: `space:${space.id}:consolidate`
+  });
+  return c.json({ ok: true, jobId });
 });
 
 llmWikiRoutes.get('/candidates', async (c) => {

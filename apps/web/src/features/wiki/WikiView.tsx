@@ -1,16 +1,21 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAdaptivePolling } from '../../hooks/useAdaptivePolling';
-import { Brain, Check, Layers, Link2, Network, Pause, Play, Plus, RefreshCw, RotateCcw, X, Zap } from 'lucide-react';
-import { api, post, skipPageLlm } from '../../api';
+import { Archive, Brain, Check, Layers, Link2, Network, Pause, Pencil, Pin, PinOff, Play, Plus, RefreshCw, RotateCcw, Trash2, X, Zap } from 'lucide-react';
+import { api, post, consolidateSpace, getJob, skipPageLlm, updateTopic, archiveTopic, reactivateTopic, deleteTopic } from '../../api';
 import { useToast } from '../../components/Toast';
 import { EmptyState } from '../../components/EmptyState';
+import { ErrorState } from '../../components/ErrorState';
+import { SkeletonList } from '../../components/Skeleton';
 import { SuggestionCard, SuggestionAccepted, suggestionTitle, HighRiskModal } from './SuggestionCard';
 import type { Space, WikiSuggestion } from '../../types';
 
 type WikiTopic = {
   id: string; title: string; status: string; source: string;
   aiSummary: string; textContent?: string; createdAt?: string;
+  // Phase B (B2.1/B2.3): fields needed for manual edit / archive / delete.
+  pinned?: boolean; lifecycleStatus?: string; publicationStatus?: string;
+  contentJson?: unknown;
 };
 
 type InboxItem = { id: string; title: string; llmProcessStatus: string; updatedAt?: string };
@@ -24,15 +29,66 @@ const INBOX_STATUS_LABEL: Record<string, string> = {
   pending: '待整理', processing: '整理中', processed: '已整理', failed: '整理失败', ignored: '已忽略'
 };
 
+/** Phase B (B2.2): render a TopicSynthesis structurally instead of a raw <pre>. */
+function TopicContentView({ topic }: { topic: WikiTopic }) {
+  const synth = (topic.contentJson ?? null) as
+    | { definition?: string; overview?: string; keyPoints?: { title: string; content: string; citations?: { chunkId: string; pageId?: string }[] }[]; conflicts?: string[]; openQuestions?: string[]; relatedTopics?: string[] }
+    | null;
+  if (!synth || typeof synth !== 'object') {
+    return topic.textContent ? (
+      <div className="topic-text-content">
+        <h4>主题内容</h4>
+        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.6 }}>{topic.textContent}</pre>
+      </div>
+    ) : null;
+  }
+  return (
+    <div className="topic-synthesis">
+      {synth.definition && (<div className="synth-block"><h4>定义</h4><p>{synth.definition}</p></div>)}
+      {synth.overview && (<div className="synth-block"><h4>概述</h4><p>{synth.overview}</p></div>)}
+      {Array.isArray(synth.keyPoints) && synth.keyPoints.length > 0 && (
+        <div className="synth-block">
+          <h4>要点</h4>
+          <ul className="synth-kp">
+            {synth.keyPoints.map((kp, i) => (
+              <li key={i}>
+                <b>{kp.title}</b>
+                <p>{kp.content}</p>
+                {Array.isArray(kp.citations) && kp.citations.length > 0 && (
+                  <span className="muted small">引用 {kp.citations.length} 条</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {Array.isArray(synth.conflicts) && synth.conflicts.length > 0 && (
+        <div className="synth-block"><h4>争议 / 冲突</h4><ul>{synth.conflicts.map((c, i) => <li key={i}>{c}</li>)}</ul></div>
+      )}
+      {Array.isArray(synth.openQuestions) && synth.openQuestions.length > 0 && (
+        <div className="synth-block"><h4>开放问题</h4><ul>{synth.openQuestions.map((q, i) => <li key={i}>{q}</li>)}</ul></div>
+      )}
+      {Array.isArray(synth.relatedTopics) && synth.relatedTopics.length > 0 && (
+        <div className="synth-block"><h4>相关主题</h4><p className="muted small">{synth.relatedTopics.join('、')}</p></div>
+      )}
+    </div>
+  );
+}
+
 export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id: string) => void }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [tab, setTab] = useState<'inbox' | 'suggestions' | 'topics'>('inbox');
+  // Phase B3.2: Topic list dimension filters (lifecycle + source).
+  const [topicLifecycle, setTopicLifecycle] = useState<'active' | 'archived'>('active');
+  const [topicSource, setTopicSource] = useState<'all' | 'ai' | 'user'>('all');
 
   const [hasActivity, setHasActivity] = useState(false);
   const poll = useAdaptivePolling({ enabled: !!space, hasActivity });
 
-  const { data: inboxData, isLoading: inboxLoading } = useQuery<{ inbox: InboxItem[] }>({
+  // Phase C1 (U5): surface load failures instead of silently showing an empty
+  // state, and expose refetch so the user can retry.
+  const { data: inboxData, isLoading: inboxLoading, isError: inboxError, error: inboxErr, refetch: refetchInbox } = useQuery<{ inbox: InboxItem[] }>({
     queryKey: ['inbox', space.id], queryFn: () => api(`/api/llm-wiki/inbox?spaceId=${space.id}`), refetchInterval: poll
   });
   const inbox = inboxData?.inbox ?? [];
@@ -42,15 +98,23 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
   });
   const autoOn = spaceData?.space?.autoLlmProcessing ?? true;
 
-  const { data: suggData } = useQuery<{ suggestions: WikiSuggestion[] }>({
+  const { data: suggData, isLoading: suggLoading, isError: suggError, error: suggErr, refetch: refetchSugg } = useQuery<{ suggestions: WikiSuggestion[] }>({
     queryKey: ['suggestions', space.id], queryFn: () => api(`/api/llm-wiki/suggestions?spaceId=${space.id}`), refetchInterval: poll
   });
   const suggestions = suggData?.suggestions ?? [];
 
-  const { data: topicData } = useQuery<{ topics: WikiTopic[] }>({
-    queryKey: ['topics', space.id], queryFn: () => api(`/api/llm-wiki/topics?spaceId=${space.id}`), refetchInterval: poll
+  const { data: topicData, isLoading: topicLoading, isError: topicError, error: topicErr, refetch: refetchTopics } = useQuery<{ topics: WikiTopic[] }>({
+    queryKey: ['topics', space.id, topicLifecycle],
+    queryFn: () => api(`/api/llm-wiki/topics?spaceId=${space.id}${topicLifecycle === 'archived' ? '&lifecycle=archived' : ''}`),
+    refetchInterval: poll
   });
   const topics = topicData?.topics ?? [];
+  // Phase B3.2: client-side source filter (ai-generated vs user-created).
+  const visibleTopics = useMemo(() => {
+    if (topicSource === 'all') return topics;
+    if (topicSource === 'ai') return topics.filter((t) => t.source === 'ai');
+    return topics.filter((t) => t.source !== 'ai');
+  }, [topics, topicSource]);
 
   // Phase 0 task 6: surface pages whose Wiki artifact generation failed.
   const { data: wikiErrData } = useQuery<{ errors: WikiError[] }>({
@@ -115,7 +179,11 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
 
   const accept = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/accept`, {}),
+    // Phase C1 (U6): optimistic removal so the card vanishes instantly instead
+    // of waiting for the refetch (still invalidated to reconcile with the server).
     onSuccess: (_r, id) => {
+      qc.setQueryData<{ suggestions: WikiSuggestion[] }>(['suggestions', space.id], (old) =>
+        old ? { ...old, suggestions: old.suggestions.filter((s) => s.id !== id) } : old);
       setSelected(new Set());
       qc.invalidateQueries({ queryKey: ['suggestions', space.id] });
       const s = suggestions.find((x) => x.id === id);
@@ -124,7 +192,12 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
   });
   const ignore = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/ignore`, {}),
-    onSuccess: () => { setSelected(new Set()); qc.invalidateQueries({ queryKey: ['suggestions', space.id] }); }
+    onSuccess: (_r, id) => {
+      qc.setQueryData<{ suggestions: WikiSuggestion[] }>(['suggestions', space.id], (old) =>
+        old ? { ...old, suggestions: old.suggestions.filter((s) => s.id !== id) } : old);
+      setSelected(new Set());
+      qc.invalidateQueries({ queryKey: ['suggestions', space.id] });
+    }
   });
   const undo = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/suggestions/${id}/undo`, {}),
@@ -162,6 +235,11 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
   const acceptTopic = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/topics/${id}/accept`, {}),
     onSuccess: () => {
+      // Phase C1 (U6): flip the topic to accepted immediately in the cache.
+      if (activeTopic) {
+        qc.setQueryData<{ topics: WikiTopic[] }>(['topics', space.id, topicLifecycle], (old) =>
+          old ? { ...old, topics: old.topics.map((t) => t.id === activeTopic.id ? { ...t, status: 'accepted' } : t) } : old);
+      }
       qc.invalidateQueries({ queryKey: ['topics', space.id] });
       if (activeTopic) setActiveTopic({ ...activeTopic, status: 'accepted' });
     }
@@ -171,6 +249,43 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['suggestions', space.id] }); qc.invalidateQueries({ queryKey: ['topics', space.id] }); toast.success('已提交重新生成，稍后查看结果'); },
     onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
   });
+
+  /* ------------------- Phase B (B1.3): async consolidate + progress poll --- */
+  // Clustering is enqueued as a job; we poll its progress and refresh the
+  // topic list once it succeeds (instead of blocking on a sync response).
+  const [consolidateJob, setConsolidateJob] = useState<{ id: string; status: string; progress: { done?: number; total?: number; stage?: string } } | null>(null);
+  const consolidatePoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  const consolidateM = useMutation({
+    mutationFn: () => consolidateSpace(space.id),
+    onSuccess: async ({ jobId }) => {
+      if (consolidatePoll.current) clearInterval(consolidatePoll.current);
+      consolidatePoll.current = setInterval(async () => {
+        try {
+          const job = await getJob(jobId);
+          setConsolidateJob({ id: job.id, status: job.status, progress: job.progress });
+          if (job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled') {
+            if (consolidatePoll.current) clearInterval(consolidatePoll.current);
+            consolidatePoll.current = null;
+            setConsolidateJob(null);
+            if (job.status === 'succeeded') {
+              await qc.invalidateQueries({ queryKey: ['topics', space.id] });
+              await qc.invalidateQueries({ queryKey: ['suggestions', space.id] });
+              toast.success('主题整合完成');
+            } else if (job.status === 'failed') {
+              toast.error(`整合失败：${job.errorMessage ?? '未知错误'}`);
+            }
+          }
+        } catch (e) {
+          if (consolidatePoll.current) clearInterval(consolidatePoll.current);
+          consolidatePoll.current = null;
+          setConsolidateJob(null);
+          toast.error(`查询整合任务失败：${(e as Error).message}`);
+        }
+      }, 1500);
+    },
+    onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
+  });
+  useEffect(() => () => { if (consolidatePoll.current) clearInterval(consolidatePoll.current); }, []);
   const undoTopicM = useMutation({
     mutationFn: (id: string) => post(`/api/llm-wiki/topics/${id}/undo`, {}),
     onSuccess: () => {
@@ -186,6 +301,32 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
     }),
     onSuccess: async (r) => { setNewTitle(''); await qc.invalidateQueries({ queryKey: ['topics', space.id] }); setActiveTopic(r.topic); }
   });
+
+  /* ----------------------------- Phase B (B2.1/B2.3): manual edit ---------- */
+  // Rename / pin via PATCH. Renaming/user-editing never gets overwritten by AI
+  // refresh (enforced server-side via publicationStatus='user_edited').
+  const updateTopicM = useMutation({
+    mutationFn: (body: { title?: string; pinned?: boolean }) => updateTopic(activeTopic!.id, body),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['topics', space.id] }); },
+    onError: (e) => toast.error(`操作失败：${(e as Error).message}`)
+  });
+  const archiveM = useMutation({
+    mutationFn: () => archiveTopic(activeTopic!.id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['topics', space.id] }); if (activeTopic) setActiveTopic({ ...activeTopic, lifecycleStatus: 'archived', status: 'archived' }); },
+    onError: (e) => toast.error(`归档失败：${(e as Error).message}`)
+  });
+  const reactivateM = useMutation({
+    mutationFn: () => reactivateTopic(activeTopic!.id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['topics', space.id] }); if (activeTopic) setActiveTopic({ ...activeTopic, lifecycleStatus: 'active', status: 'accepted' }); },
+    onError: (e) => toast.error(`恢复失败：${(e as Error).message}`)
+  });
+  const deleteM = useMutation({
+    mutationFn: () => deleteTopic(activeTopic!.id),
+    onSuccess: async () => { setActiveTopic(null); await qc.invalidateQueries({ queryKey: ['topics', space.id] }); toast.success('主题已删除（可在归档中心恢复）'); },
+    onError: (e) => toast.error(`删除失败：${(e as Error).message}`)
+  });
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
 
   const TABS: { key: typeof tab; label: string; icon: React.ReactNode; count: number }[] = [
     { key: 'inbox', label: 'Inbox', icon: <Layers size={16} />, count: inbox.length },
@@ -216,6 +357,15 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
           </button>
         ))}
         <div className="wiki-tabs-right">
+          {consolidateJob ? (
+            <span className="chip" title={`整合进度 ${consolidateJob.progress.done ?? 0}/${consolidateJob.progress.total ?? '?'}`}>
+              <Brain size={13} /> 整合中 {consolidateJob.progress.done ?? 0}/{consolidateJob.progress.total ?? '?'}
+            </span>
+          ) : (
+            <button className="chip" onClick={() => consolidateM.mutate()} title="整合本 Space 的候选主题为正式主题" disabled={consolidateM.isPending}>
+              <Brain size={13} /> 整合主题
+            </button>
+          )}
           <button className="chip" onClick={() => reprocess.mutate()} title="重新处理本 Space 全部笔记并生成 Wiki 产物" disabled={reprocess.isPending}>
             <RefreshCw size={13} /> 重新生成
           </button>
@@ -239,8 +389,9 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
               </button>
             </div>
           )}
-          {inboxLoading && <div className="muted small">加载中…</div>}
-          {!inboxLoading && inbox.length === 0 && (
+          {inboxError && <ErrorState title="收件箱加载失败" message={(inboxErr as Error)?.message} onRetry={() => refetchInbox()} />}
+          {!inboxError && inboxLoading && <SkeletonList rows={5} />}
+          {!inboxError && !inboxLoading && inbox.length === 0 && (
             <EmptyState icon={<Layers size={36} />} title="收件箱为空" hint="新建或编辑笔记后会自动进入 LLM 处理队列，处理完成后将生成主题与建议。" />
           )}
           {inbox.map((p) => {
@@ -273,37 +424,44 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
 
       {tab === 'suggestions' && (
         <div className="wiki-pane">
-          <div className="batch-bar">
-            <label className="check-all">
-              <input type="checkbox" checked={selected.size === visibleSuggestions.length && visibleSuggestions.length > 0}
-                onChange={(e) => setSelected(e.target.checked ? new Set(visibleSuggestions.map((s) => s.id)) : new Set())} />
-              全选
-            </label>
-            <span className="muted small">已选 {selected.size} / {visibleSuggestions.length}</span>
-            <div className="spacer" />
-            <button className="ghost sm" disabled={lowRiskIds.length === 0 || bulkAccept.isPending} onClick={() => bulkAccept.mutate(lowRiskIds)} title="一次性接受所有低风险建议">
-              <Check size={14} /> 批量接受低风险（{lowRiskIds.length}）
-            </button>
-            <button className="primary sm" disabled={selected.size === 0 || bulkAccept.isPending} onClick={() => bulkAccept.mutate([...selected])}>
-              <Check size={14} /> 批量接受
-            </button>
-          </div>
-          {visibleSuggestions.length === 0 && recentlyAccepted.length === 0 && (
-            <EmptyState icon={<Brain size={36} />} title="暂无待审阅建议" hint="处理笔记后会由 AI 生成主题提案与关联建议。" />
+          {suggError ? (
+            <ErrorState title="建议加载失败" message={(suggErr as Error)?.message} onRetry={() => refetchSugg()} />
+          ) : (
+            <>
+              <div className="batch-bar">
+                <label className="check-all">
+                  <input type="checkbox" checked={selected.size === visibleSuggestions.length && visibleSuggestions.length > 0}
+                    onChange={(e) => setSelected(e.target.checked ? new Set(visibleSuggestions.map((s) => s.id)) : new Set())} />
+                  全选
+                </label>
+                <span className="muted small">已选 {selected.size} / {visibleSuggestions.length}</span>
+                <div className="spacer" />
+                <button className="ghost sm" disabled={lowRiskIds.length === 0 || bulkAccept.isPending} onClick={() => bulkAccept.mutate(lowRiskIds)} title="一次性接受所有低风险建议">
+                  <Check size={14} /> 批量接受低风险（{lowRiskIds.length}）
+                </button>
+                <button className="primary sm" disabled={selected.size === 0 || bulkAccept.isPending} onClick={() => bulkAccept.mutate([...selected])}>
+                  <Check size={14} /> 批量接受
+                </button>
+              </div>
+              {suggLoading && <SkeletonList rows={5} />}
+              {!suggLoading && visibleSuggestions.length === 0 && recentlyAccepted.length === 0 && (
+                <EmptyState icon={<Brain size={36} />} title="暂无待审阅建议" hint="处理笔记后会由 AI 生成主题提案与关联建议。" />
+              )}
+              {!suggLoading && visibleSuggestions.map((s) => (
+                <SuggestionCard
+                  key={s.id}
+                  s={s}
+                  onAccept={(x) => accept.mutate(x.id)}
+                  onIgnore={(x) => ignore.mutate(x.id)}
+                  onSnooze={(x) => setSnoozed((p) => new Set(p).add(x.id))}
+                  onAcceptHigh={(x) => setHighSugg(x)}
+                />
+              ))}
+              {recentlyAccepted.map((a) => (
+                <SuggestionAccepted key={a.id} label={a.label} onUndo={() => undo.mutate(a.id)} />
+              ))}
+            </>
           )}
-          {visibleSuggestions.map((s) => (
-            <SuggestionCard
-              key={s.id}
-              s={s}
-              onAccept={(x) => accept.mutate(x.id)}
-              onIgnore={(x) => ignore.mutate(x.id)}
-              onSnooze={(x) => setSnoozed((p) => new Set(p).add(x.id))}
-              onAcceptHigh={(x) => setHighSugg(x)}
-            />
-          ))}
-          {recentlyAccepted.map((a) => (
-            <SuggestionAccepted key={a.id} label={a.label} onUndo={() => undo.mutate(a.id)} />
-          ))}
         </div>
       )}
 
@@ -315,8 +473,25 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
                 onKeyDown={(e) => e.key === 'Enter' && createTopic.mutate()} />
               <button className="icon-btn" disabled={createTopic.isPending} onClick={() => createTopic.mutate()}><Plus size={15} /></button>
             </div>
-            {topics.length === 0 && <EmptyState icon={<Network size={36} />} title="暂无 Topic" hint="处理笔记后，AI 会提炼候选主题；也可手动创建。" />}
-            {topics.map((t) => (
+            {/* Phase B3.2: lifecycle + source dimension filters. */}
+            <div className="topic-filters">
+              <div className="seg">
+                <button className={topicLifecycle === 'active' ? 'on' : ''} onClick={() => setTopicLifecycle('active')}>活跃</button>
+                <button className={topicLifecycle === 'archived' ? 'on' : ''} onClick={() => setTopicLifecycle('archived')}>已归档</button>
+              </div>
+              <select value={topicSource} onChange={(e) => setTopicSource(e.target.value as 'all' | 'ai' | 'user')} title="来源">
+                <option value="all">全部来源</option>
+                <option value="ai">AI 生成</option>
+                <option value="user">人工创建</option>
+              </select>
+            </div>
+            {topicError ? (
+              <ErrorState title="主题加载失败" message={(topicErr as Error)?.message} onRetry={() => refetchTopics()} />
+            ) : (
+              <>
+                {topicLoading && <SkeletonList rows={5} />}
+                {!topicLoading && visibleTopics.length === 0 && <EmptyState icon={<Network size={36} />} title={topicLifecycle === 'archived' ? '归档中暂无主题' : '暂无 Topic'} hint="处理笔记后，AI 会提炼候选主题；也可手动创建。" />}
+                {!topicLoading && visibleTopics.map((t) => (
               <button key={t.id} className={`topic-item${activeTopic?.id === t.id ? ' active' : ''}`} onClick={() => setActiveTopic(t)}>
                 <div><b>{t.title}</b><span className={`tag status-${t.status}`}>{TOPIC_STATUS_LABEL[t.status] ?? t.status}</span></div>
                 {t.status === 'stale' && (
@@ -331,16 +506,38 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
                 {t.aiSummary && <p className="muted small topic-sum">{t.aiSummary}</p>}
               </button>
             ))}
+              </>
+            )}
           </div>
           <div className="topic-detail">
             {!activeTopic && <EmptyState icon={<Network size={36} />} title="选择左侧主题查看详情" />}
             {activeTopic && (
               <>
                 <div className="topic-detail-head">
-                  <h3>{activeTopic.title}</h3>
+                  {editingTitle ? (
+                    <input
+                      className="topic-title-input"
+                      autoFocus
+                      value={titleDraft}
+                      onChange={(e) => setTitleDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && titleDraft.trim()) { updateTopicM.mutate({ title: titleDraft.trim() }); setActiveTopic({ ...activeTopic, title: titleDraft.trim(), status: 'user_edited', publicationStatus: 'user_edited' }); setEditingTitle(false); }
+                        if (e.key === 'Escape') setEditingTitle(false);
+                      }}
+                      onBlur={() => setEditingTitle(false)}
+                    />
+                  ) : (
+                    <h3>
+                      {activeTopic.title}
+                      <button className="icon-btn" title="重命名" onClick={() => { setTitleDraft(activeTopic.title); setEditingTitle(true); }}><Pencil size={13} /></button>
+                    </h3>
+                  )}
                   <span className={`tag status-${activeTopic.status}`}>{TOPIC_STATUS_LABEL[activeTopic.status] ?? activeTopic.status}</span>
+                  {activeTopic.lifecycleStatus === 'archived' && <span className="tag status-archived">已归档</span>}
+                  {activeTopic.pinned && <span className="tag">📌 置顶</span>}
                 </div>
                 <p className="topic-ai-sum">{activeTopic.aiSummary || '（暂无 AI 摘要）'}</p>
+                <TopicContentView topic={activeTopic} />
                 <div className="topic-detail-actions">
                   {activeTopic.status !== 'accepted' && (
                     <button className="primary sm" disabled={acceptTopic.isPending} onClick={() => acceptTopic.mutate(activeTopic.id)}><Check size={14} /> 采纳主题</button>
@@ -354,6 +551,16 @@ export function WikiView({ space, onOpenPage }: { space: Space; onOpenPage: (id:
                     </button>
                   )}
                   <button className="ghost" disabled={refreshTopic.isPending} onClick={() => refreshTopic.mutate(activeTopic.id)}><RefreshCw size={14} /> 刷新建议</button>
+                  {/* Phase B (B2.1): manual lifecycle / edit actions */}
+                  <button className="ghost" disabled={updateTopicM.isPending} onClick={() => updateTopicM.mutate({ pinned: !activeTopic.pinned })}>
+                    {activeTopic.pinned ? <><PinOff size={14} /> 取消置顶</> : <><Pin size={14} /> 置顶</>}
+                  </button>
+                  {activeTopic.lifecycleStatus !== 'archived' ? (
+                    <button className="ghost" disabled={archiveM.isPending} onClick={() => { if (confirm('归档后该主题将降权但仍可搜索，可在归档中心恢复。确认归档？')) archiveM.mutate(); }}><Archive size={14} /> 归档</button>
+                  ) : (
+                    <button className="ghost" disabled={reactivateM.isPending} onClick={() => reactivateM.mutate()}><RotateCcw size={14} /> 恢复</button>
+                  )}
+                  <button className="ghost danger" disabled={deleteM.isPending} onClick={() => { if (confirm('删除后主题不会立即消失，而是进入归档中心（可恢复）。确认删除？')) deleteM.mutate(); }}><Trash2 size={14} /> 删除</button>
                 </div>
                 <h4>来源页面（{topicSources?.sources?.length ?? 0}）</h4>
                 <div className="topic-sources">

@@ -6,6 +6,8 @@ import { api, post } from '../../api';
 import { urls, routeToUrl } from '../../nav';
 import { extractText } from '../../editor/prosemirror';
 import { CommandPalette } from '../../components/CommandPalette';
+import { ShortcutsHelp } from '../../components/ShortcutsHelp';
+import { Onboarding } from '../../components/Onboarding';
 import { EmptyState } from '../../components/EmptyState';
 import { EditorSkeleton } from '../../components/Skeleton';
 import { NewPageDialog } from '../../components/NewPageDialog';
@@ -17,6 +19,7 @@ import { TopBar } from './TopBar';
 import { RightPanel } from './RightPanel';
 import { useShellContext, loadLastSpace } from './useShellContext';
 import { HomeView } from '../home/HomeView';
+import { ArchiveCenter } from './ArchiveCenter';
 import { PageEditor } from '../notes/PageEditor';
 import { WikiView } from '../wiki/WikiView';
 import { SearchView } from '../search/SearchView';
@@ -41,6 +44,10 @@ export function ShellLayout({ me }: { me: User }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(true);
   const [newPageOpen, setNewPageOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(() => {
+    try { return !localStorage.getItem('ml.onboarded'); } catch { return false; }
+  });
 
   const pathname = location.pathname;
   const isRoot = pathname === '/';
@@ -51,6 +58,7 @@ export function ShellLayout({ me }: { me: User }) {
   const mapMatch = /^\/map\//.test(pathname);
   const spaceHomeMatch = /^\/w\/([^/]+)\/s\/([^/]+)/.test(pathname);
   const pageMatch = /^\/p\/([^/]+)/.test(pathname);
+  const archiveMatch = pathname === '/archive';
 
   // On-demand provisioning for accounts with no workspace yet.
   const provision = useMutation({
@@ -153,6 +161,20 @@ export function ShellLayout({ me }: { me: User }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [space]);
 
+  // Phase C2.7 (U12): `?` opens the keyboard-shortcuts panel — unless the user
+  // is typing in a field or the editor (where `?` is literal input).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '?') return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable || !!t.closest('.ProseMirror'))) return;
+      e.preventDefault();
+      setShortcutsOpen((o) => !o);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   // Browser tab title follows the current page (deep-link friendly).
   useEffect(() => {
     if (pageId) document.title = ctx.pageTitle ? `${ctx.pageTitle} - MindLoom` : 'MindLoom';
@@ -202,6 +224,7 @@ export function ShellLayout({ me }: { me: User }) {
 
   const renderCenter = () => {
     if (isSettings) return <SettingsView me={meUser} onLogout={onLogout} />;
+    if (archiveMatch) return <ArchiveCenter space={space} workspace={workspace} onNavigate={onNavigate} />;
 
     if (wikiMatch) {
       if (ctx.isResolving) return <EditorSkeleton />;
@@ -304,6 +327,7 @@ export function ShellLayout({ me }: { me: User }) {
           route={activeRoute}
           pageId={pageId}
           pageTitle={ctx.pageTitle}
+          tree={treeData?.tree ?? []}
           onOpenPalette={() => setPaletteOpen(true)}
         />
 
@@ -343,6 +367,8 @@ export function ShellLayout({ me }: { me: User }) {
         onNavigate={onNavigate}
         onNewNote={onNewNote}
         onRunSearch={onRunSearch}
+        workspaceId={workspace?.id ?? ''}
+        spaceId={space?.id}
       />
 
       {newPageOpen && (
@@ -351,6 +377,9 @@ export function ShellLayout({ me }: { me: User }) {
           onCreate={(id) => createWithTemplate.mutate(id)}
         />
       )}
+
+      <ShortcutsHelp open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      {showOnboarding && <Onboarding onClose={() => setShowOnboarding(false)} />}
     </div>
   );
 }

@@ -152,6 +152,7 @@ input:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3p
 .move-target:hover { border-color: var(--primary); color: var(--text); }
 .move-target.root { color: var(--primary); font-weight: 600; }
 .move-list { max-height: 50vh; overflow: auto; margin-top: 8px; }
+.move-indent { width: 2px; align-self: stretch; min-height: 12px; background: var(--primary-soft); border-radius: 2px; flex: none; }
 
 /* ------- Drag feedback in the page tree — Phase 6 ------- */
 .tree-item.dragging { opacity: .4; }
@@ -198,3 +199,78 @@ button.danger-solid:hover:not(:disabled) { background: #b91c1c; }
 .conflict-title { padding: 10px 12px 4px; font-weight: 600; font-size: 14px; }
 .conflict-preview { margin: 0; padding: 0 12px 12px; font-size: 12px; line-height: 1.6; color: var(--text-2); white-space: pre-wrap; max-height: 260px; overflow: auto; font-family: var(--font-mono); }
 @media (max-width: 640px) { .conflict-cols { grid-template-columns: 1fr; } }
+
+/* Phase B3.2: Topic list dimension filters (lifecycle + source). */
+.topic-filters { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
+.topic-filters .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.topic-filters .seg button { border: 0; background: var(--surface); color: var(--text-2); padding: 5px 10px; font-size: 12px; }
+.topic-filters .seg button.on { background: var(--primary); color: #fff; }
+.topic-filters select { margin-left: auto; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12px; }
+
+/* Phase C1 (U7): persistent auto-apply toggle in the RightPanel suggestions header. */
+.auto-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); cursor: pointer; user-select: none; margin-left: auto; }
+.auto-toggle input { width: auto; }
+
+/* Phase C2.6 (U12): "convert to" submenu inside the block handle popup. */
+.block-submenu { position: absolute; left: calc(100% + 4px); top: 0; min-width: 116px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 4px; display: flex; flex-direction: column; gap: 2px; z-index: 5; }
+.block-menu-item.sub-open { color: var(--primary); }
+
+/* Phase C2.7 (U12): keyboard shortcuts panel. */
+.shortcuts { width: min(560px, 94vw); max-height: 80vh; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-pop); padding: 20px 22px; }
+.shortcuts-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.shortcuts-head h3 { margin: 0; font-size: 16px; }
+.shortcuts-body { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 24px; }
+.shortcuts-group h4 { margin: 0 0 8px; font-size: 13px; color: var(--text-2); }
+.shortcuts-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 13px; }
+.shortcuts-row kbd { font-family: var(--font-mono); font-size: 11px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; white-space: nowrap; color: var(--text); }
+.shortcuts-row span { color: var(--text-2); }
+@media (max-width: 640px) { .shortcuts-body { grid-template-columns: 1fr; } }
+
+/* Phase C4 (U11): first-visit onboarding. */
+.onboarding { width: min(440px, 94vw); background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow-pop); padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+.onboarding-head { display: flex; align-items: center; justify-content: space-between; }
+.onboarding-brand { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: var(--primary); }
+.onboarding-skip { background: transparent; border: 0; color: var(--text-2); font-size: 13px; }
+.onboarding-body { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 6px 0; }
+.onboarding-step-icon { width: 56px; height: 56px; border-radius: 16px; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); }
+.onboarding-body h3 { margin: 4px 0 0; font-size: 18px; }
+.onboarding-dots { display: flex; gap: 7px; margin-top: 4px; }
+.onboarding-dots .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--border-strong); }
+.onboarding-dots .dot.on { background: var(--primary); }
+.onboarding-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+/* Phase C4 (U11): empty-space call-to-action buttons. */
+.home-empty-cta { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.home-empty-actions { display: flex; gap: 10px; }
+
+/* Phase C2.3 (U9): grouped results + content-match snippet in the palette. */
+.cmkd-section { display: flex; flex-direction: column; gap: 2px; }
+.cmkd-section + .cmdk-section { margin-top: 4px; }
+.cmkd-section-label { padding: 8px 12px 2px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .03em; }
+.cmkd-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cmkd-item-sub { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmkd-item.active .cmdk-item-sub { color: var(--primary); opacity: .85; }
+
+/* Phase C2.3 (U9) palette groups + snippet */
+.cmkd-section { display: flex; flex-direction: column; gap: 2px; }
+.cmkd-section + .cmdk-section { margin-top: 4px; }
+.cmkd-section-label { padding: 8px 12px 2px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .03em; }
+.cmkd-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cmkd-item-sub { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmkd-item.active .cmdk-item-sub { color: var(--primary); opacity: .85; }
+
+/* Phase C2.3 (U9) palette groups + snippet */
+.cmkd-section { display: flex; flex-direction: column; gap: 2px; }
+.cmkd-section + .cmdk-section { margin-top: 4px; }
+.cmkd-section-label { padding: 8px 12px 2px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .03em; }
+.cmkd-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cmkd-item-sub { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmkd-item.active .cmdk-item-sub { color: var(--primary); opacity: .85; }
+
+/* C2.1-fix: unambiguous insertion caret + label while dragging in the tree. */
+.tree-caret-line { position: absolute; right: 10px; height: 3px; background: var(--primary); border-radius: 3px; pointer-events: none; z-index: 5; }
+.tree-caret-line::before { content: ''; position: absolute; left: -5px; top: 50%; transform: translateY(-50%); width: 7px; height: 7px; border-radius: 50%; background: var(--primary); }
+.tree-caret-line.zone-child { background: var(--primary); box-shadow: 0 0 0 1px var(--primary-soft); }
+.tree-caret-badge { position: absolute; left: 8px; top: -12px; font-size: 11px; line-height: 1; padding: 2px 8px; border-radius: 999px; background: var(--primary); color: #fff; white-space: nowrap; box-shadow: 0 1px 4px rgba(0,0,0,.28); }
+.tree-item.drop-target { background: var(--primary-soft); }
+.tree-item.drop-child { box-shadow: inset 3px 0 0 var(--primary), 0 0 0 1px var(--primary-soft); background: var(--primary-soft); }

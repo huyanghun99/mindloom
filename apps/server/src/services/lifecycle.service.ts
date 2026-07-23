@@ -57,7 +57,7 @@ export async function isProtectedTopic(topic: Record<string, unknown>, stats: Re
   if (topic.freshness_status === 'stale') return true;
   if (await isReferencedByActiveProject(topic.id as string)) return true;
   // Recently cited by RAG (a "final" reference) keeps it alive.
-  if (stats?.last_retrieved_at && daysSince(new Date(stats.last_retrieved_at as string), new Date()) <= RAG_CITATION_PROTECT_DAYS) {
+  if (stats?.lastRetrievedAt && daysSince(new Date(stats.lastRetrievedAt as string), new Date()) <= RAG_CITATION_PROTECT_DAYS) {
     return true;
   }
   return false;
@@ -78,7 +78,13 @@ async function maybeSuggest(
       AND payload ->> 'topicId' = ${topic.id}::text
     LIMIT 1
   `);
-  if (existing.rows.length > 0) return;
+  if (existing.rows.length > 0) {
+    // Idempotent: a pending suggestion of this type already exists. Do NOT
+    // stack a duplicate, but still reflect it in the returned set so callers
+    // (the evaluate API / Archive Center) see the current pending suggestions.
+    sink.push({ topicId: topic.id as string, spaceId: space.id as string, type, reason });
+    return;
+  }
   await db.execute(sql`
     INSERT INTO llm_suggestions(workspace_id, space_id, page_id, topic_id, type, risk, status, payload, evidence)
     VALUES (
@@ -165,7 +171,7 @@ export async function evaluateLifecycle(workspaceId?: string, spaceId?: string):
     `);
     for (const topic of archivedRows.rows) {
       const stats = await getActivityStats('topic', topic.id);
-      if (stats?.last_retrieved_at && daysSince(new Date(stats.last_retrieved_at as string), new Date()) <= RAG_CITATION_PROTECT_DAYS) {
+      if (stats?.lastRetrievedAt && daysSince(new Date(stats.lastRetrievedAt as string), new Date()) <= RAG_CITATION_PROTECT_DAYS) {
         await maybeSuggest(space, topic, 'reactivation', '归档主题近期被 RAG 引用，建议重新激活。', suggestions);
       }
     }

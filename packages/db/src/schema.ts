@@ -218,6 +218,11 @@ export const wikiTopics = pgTable('wiki_topics', {
   archivedAt: timestamp('archived_at', { withTimezone: true }),
   archivedById: uuid('archived_by_id').references(() => users.id),
   archiveReason: text('archive_reason'),
+  // Phase B (B2.3): soft-delete. We never hard-delete a Topic — a delete is an
+  // archive with reason 'deleted' so it stays auditable and recoverable. These
+  // columns disambiguate a *deleted* archive from a *regular* archive.
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  deletedById: uuid('deleted_by_id').references(() => users.id),
   pinned: boolean('pinned').notNull().default(false),
   keepActiveUntil: timestamp('keep_active_until', { withTimezone: true }),
   promotedFromTopicId: uuid('promoted_from_topic_id'),
@@ -257,6 +262,10 @@ export const topicCandidates = pgTable('topic_candidates', {
   profile: jsonb('profile').$type<Record<string, unknown>>().notNull().default({}),
   status: text('status').notNull().default('candidate').$type<'candidate' | 'promoted' | 'dismissed'>(),
   promotedTopicId: uuid('promoted_topic_id').references(() => wikiTopics.id, { onDelete: 'set null' }),
+  // Phase B (B1.2): candidate title embedding, pre-computed during page indexing
+  // so clustering is embedding-dominated. NULL for legacy candidates (degrades
+  // gracefully to normalized-title + same-page grouping).
+  titleEmbedding: vector('title_embedding', { dimensions: 1536 }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
 }, (t) => ({
@@ -280,6 +289,20 @@ export const topicSources = pgTable('topic_sources', {
   contributionType: text('contribution_type'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 }, (t) => ({ pk: primaryKey({ columns: [t.topicId, t.pageId] }) }));
+
+// Phase B (B1.1): synonym / alias normalisation table. Maps a normalized term
+// (e.g. "ml", "机器学习", "机器智能") to a single canonical key (e.g.
+// "machinelearning") so that semantically-equivalent topic titles cluster
+// together instead of producing many near-duplicate Topics. A NULL workspace_id
+// row is a *global* default applied to every workspace.
+export const topicSynonyms = pgTable('topic_synonyms', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  workspaceId: uuid('workspace_id').references(() => workspaces.id, { onDelete: 'cascade' }),
+  normalizedTerm: text('normalized_term').notNull(),
+  canonicalTerm: text('canonical_term').notNull(),
+  addedById: uuid('added_by_id').references(() => users.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+}, (t) => ({ uq: uniqueIndex('uidx_synonyms_ws_term').on(t.workspaceId, t.normalizedTerm) }));
 
 export const entities = pgTable('entities', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -379,6 +402,9 @@ export const jobs = pgTable('jobs', {
   lockedBy: text('locked_by'),
   lockedAt: timestamp('locked_at', { withTimezone: true }),
   errorMessage: text('error_message'),
+  // Phase B (B1.3): async job progress ({ done, total, stage }) written by the
+  // worker so the UI can poll instead of blocking on a sync response.
+  progress: jsonb('progress').$type<{ done?: number; total?: number; stage?: string }>().notNull().default({}),
   costEstimateTokens: integer('cost_estimate_tokens').default(0),
   actualPromptTokens: integer('actual_prompt_tokens').default(0),
   actualCompletionTokens: integer('actual_completion_tokens').default(0),

@@ -21,6 +21,7 @@ interface BlockRange {
 export function BlockHandle({ editor }: { editor: Editor }) {
   const handleRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [convertOpen, setConvertOpen] = useState(false);
   const rangeRef = useRef<BlockRange | null>(null);
 
   useEffect(() => {
@@ -115,6 +116,26 @@ export function BlockHandle({ editor }: { editor: Editor }) {
     setMenuOpen(false);
   };
 
+  // Phase C2.6 (U12): convert the hovered block into another type. We first
+  // move the selection onto the captured block range, then run the block
+  // command (toggle*) so it applies to the right node.
+  const convertTo = (kind: 'h1' | 'h2' | 'h3' | 'p' | 'ul' | 'quote' | 'code') => {
+    const range = rangeRef.current;
+    if (!range) return;
+    editor.chain().focus().setTextSelection(range).run();
+    switch (kind) {
+      case 'h1': editor.chain().focus().toggleHeading({ level: 1 }).run(); break;
+      case 'h2': editor.chain().focus().toggleHeading({ level: 2 }).run(); break;
+      case 'h3': editor.chain().focus().toggleHeading({ level: 3 }).run(); break;
+      case 'p': editor.chain().focus().setParagraph().run(); break;
+      case 'ul': editor.chain().focus().toggleBulletList().run(); break;
+      case 'quote': editor.chain().focus().toggleBlockquote().run(); break;
+      case 'code': editor.chain().focus().toggleCodeBlock().run(); break;
+    }
+    setConvertOpen(false);
+    setMenuOpen(false);
+  };
+
   return (
     <div ref={handleRef} className="block-handle" style={{ display: 'none' }} onDragEnd={onDragEnd}>
       <button
@@ -133,6 +154,25 @@ export function BlockHandle({ editor }: { editor: Editor }) {
           <button type="button" className="block-menu-item" onClick={duplicate}>
             <Copy size={13} /> 复制
           </button>
+          <button
+            type="button"
+            className={`block-menu-item${convertOpen ? ' sub-open' : ''}`}
+            onClick={() => setConvertOpen((o) => !o)}
+            onMouseEnter={() => setConvertOpen(true)}
+          >
+            转换为…
+          </button>
+          {convertOpen && (
+            <div className="block-submenu" onMouseDown={(e) => e.stopPropagation()}>
+              <button type="button" className="block-menu-item" onClick={() => convertTo('h1')}>标题 1</button>
+              <button type="button" className="block-menu-item" onClick={() => convertTo('h2')}>标题 2</button>
+              <button type="button" className="block-menu-item" onClick={() => convertTo('h3')}>标题 3</button>
+              <button type="button" className="block-menu-item" onClick={() => convertTo('p')}>正文</button>
+              <button type="button" className="block-menu-item" onClick={() => convertTo('ul')}>无序列表</button>
+              <button type="button" className="block-menu-item" onClick={() => convertTo('quote')}>引用</button>
+              <button type="button" className="block-menu-item" onClick={() => convertTo('code')}>代码块</button>
+            </div>
+          )}
           <button type="button" className="block-menu-item danger" onClick={remove}>
             <Trash2 size={13} /> 删除
           </button>

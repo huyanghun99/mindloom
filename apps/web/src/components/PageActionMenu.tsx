@@ -89,10 +89,10 @@ export function MovePageDialog({
   };
   collect(page.children);
 
-  const flat: TreeNode[] = [];
+  const flat: { node: TreeNode; depth: number }[] = [];
   const walk = (nodes: TreeNode[], depth: number) => {
     for (const n of nodes) {
-      if (!banned.has(n.id)) flat.push({ ...n, children: [] });
+      if (!banned.has(n.id)) flat.push({ node: n, depth });
       walk(n.children, depth + 1);
     }
   };
@@ -116,8 +116,14 @@ export function MovePageDialog({
             <FileText size={14} /> （移至根级）
           </button>
           <div className="move-list">
-            {flat.map((n) => (
-              <button key={n.id} className="move-target" onClick={() => onMove(n.id)}>
+            {flat.map(({ node: n, depth }) => (
+              <button
+                key={n.id}
+                className="move-target"
+                style={{ paddingLeft: 12 + depth * 16 }}
+                onClick={() => onMove(n.id)}
+              >
+                {depth > 0 && <span className="move-indent" aria-hidden />}
                 <FileText size={14} /> {n.title || '未命名笔记'}
               </button>
             ))}

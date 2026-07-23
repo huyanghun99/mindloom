@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { inArray } from 'drizzle-orm';
 import { MockAiProvider } from '@mindloom/ai';
 import { db, sql, makeUser, makeWorkspace, makeSpace, cleanDb, sessionCookie } from './test-utils';
 import { createApp } from '../app';
-import { wikiTopics, spaces, topicSources, documentChunks, topicOperations, projectClosurePackages, pages } from '@mindloom/db';
+import { wikiTopics, spaces, topicSources, topicOperations, pages, documentChunks } from '@mindloom/db';
 import { generateClosurePackage, deriveTopicToSpace } from '../services/closure.service';
 import { undoTopicOperation } from '../services/wiki.service';
 import { closurePackageSchema } from '@mindloom/shared';
@@ -118,8 +119,8 @@ describe('Phase 6 — project closure & promotion', () => {
     for (const c of pkg.goalsAndResults.citations as { chunkId: string }[]) allCited.push(c.chunkId);
 
     expect(allCited.length).toBeGreaterThan(0);
-    const realRows = await db.execute<any>(sql`SELECT id FROM document_chunks WHERE id = ANY(${allCited}::uuid[])`);
-    const realIds = new Set(realRows.rows.map((r: { id: string }) => r.id));
+    const realRows = await db.select({ id: documentChunks.id }).from(documentChunks).where(inArray(documentChunks.id, allCited));
+    const realIds = new Set(realRows.map((r: { id: string }) => r.id));
     for (const id of allCited) expect(realIds.has(id)).toBe(true);
 
     // Each key decision / reusable candidate has at least one citation.
@@ -166,7 +167,7 @@ describe('Phase 6 — project closure & promotion', () => {
     const area = await makeSpace(ws, user, 'area', 'cloud_allowed');
     await db.update(spaces).set({ spaceKind: 'area' }).where(sql`id = ${area.id}`);
 
-    const { topic: orig, chunkIds, pageIds } = await makeCitedTopic(project, user, { title: 'Reusable', kp: 'Gamma', content: 'cross-project knowledge', pages: 2 });
+    const { topic: orig } = await makeCitedTopic(project, user, { title: 'Reusable', kp: 'Gamma', content: 'cross-project knowledge', pages: 2 });
 
     const { topicId: newId, operationId } = await deriveTopicToSpace(orig.id, area.id, user.id, 'Promoted Reusable');
 

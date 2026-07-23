@@ -1,6 +1,11 @@
 export type User = { id: string; email: string; name: string; isInstanceOwner: boolean };
 export type Workspace = { id: string; name: string; role?: string };
-export type Space = { id: string; name: string; workspaceId: string; role?: string };
+export type Space = {
+  id: string; name: string; workspaceId: string; role?: string;
+  // Phase B3 (领域/项目分类): Space kind + lifecycle, returned by GET /spaces.
+  kind?: 'project' | 'area' | 'resource' | 'inbox';
+  lifecycleStatus?: 'active' | 'on_hold' | 'completed' | 'archived';
+};
 
 // Lightweight page node returned by the tree / list API. Deliberately
 // EXCLUDES contentJson and textContent (see AGENTS.md perf rules).
@@ -37,7 +42,7 @@ export type TreeNode = PageNode & { children: TreeNode[] };
 // Primary destinations rendered in the center column. The three-column shell
 // (left sidebar + top bar + right panel) stays mounted across all of them, so
 // notes / organize / search never feel like separate apps.
-export type MainRoute = 'home' | 'page' | 'organize' | 'search' | 'ask' | 'map';
+export type MainRoute = 'home' | 'page' | 'organize' | 'search' | 'ask' | 'map' | 'archive';
 
 export type RagSession = {
   id: string;

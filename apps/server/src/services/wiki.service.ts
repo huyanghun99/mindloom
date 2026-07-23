@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/client';
-import { llmSuggestions, topicCandidates, wikiTopics, topicSources, documentChunks, topicOperations } from '@mindloom/db';
+import { llmSuggestions, topicCandidates, wikiTopics, topicSources, documentChunks, topicOperations, topicSynonyms } from '@mindloom/db';
 import { createAiProviderForContext, vectorToSqlLiteral, isAiDisabledError } from './ai.service';
 import { recordActivity } from './activity.service';
 import { env } from '../env';
@@ -274,6 +274,34 @@ export function normalizeTitle(t: string): string {
     .trim();
 }
 
+/**
+ * Phase B (B1.1): synonym-aware normalization. Maps an alias to its canonical
+ * term (e.g. "ML" / "机器学习" -> "machinelearning") so semantically-equivalent
+ * titles cluster together. The map is cached per workspace (global synonyms
+ * have a NULL workspace_id and apply everywhere).
+ */
+const synonymCache = new Map<string, Map<string, string>>();
+export async function getSynonymMap(workspaceId: string): Promise<Map<string, string>> {
+  const cached = synonymCache.get(workspaceId);
+  if (cached) return cached;
+  const rows = await db
+    .select()
+    .from(topicSynonyms)
+    .where(sql`workspace_id = ${workspaceId}::uuid OR workspace_id IS NULL`);
+  const m = new Map<string, string>();
+  for (const r of rows) m.set(normalizeTitle(r.normalizedTerm), r.canonicalTerm);
+  synonymCache.set(workspaceId, m);
+  return m;
+}
+export function applySynonyms(term: string, syn: Map<string, string>): string {
+  const n = normalizeTitle(term);
+  return syn.get(n) ?? n;
+}
+/** Test/utility hook to clear the per-workspace synonym cache. */
+export function clearSynonymCache(): void {
+  synonymCache.clear();
+}
+
 export type TopicCreationDecision = 'single_source' | 'normal' | 'none';
 
 /**
@@ -307,6 +335,21 @@ function cosineSimilarity(a: number[] | null, b: number[] | null): number {
   }
   const denom = Math.sqrt(na) * Math.sqrt(nb);
   return denom === 0 ? 0 : dot / denom;
+}
+
+/** Parse a stored pgvector value (number[] or JSON-string) into number[] | null. */
+function parseVector(v: unknown): number[] | null {
+  if (v == null) return null;
+  if (Array.isArray(v)) return v as number[];
+  if (typeof v === 'string') {
+    try {
+      const p = JSON.parse(v);
+      return Array.isArray(p) ? (p as number[]) : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 interface SupportChunk {
@@ -459,19 +502,16 @@ export async function indexTopicForSearch(
   synth: TopicSynthesis,
   ai: AiProvider
 ): Promise<void> {
-  await db.execute(sql`DELETE FROM document_chunks WHERE topic_id = ${topic.id}::uuid`);
   const embModel = env.AI_EMBEDDING_MODEL;
   const dim = env.EMBEDDING_DIMENSION;
   const items: any[] = [];
+  // Compute embeddings FIRST. If embedding fails we bail out and keep the
+  // existing index untouched, so the Topic never vanishes from search / RAG
+  // (gate: 索引更新失败不丢旧数据 — 老 chunk 仍可搜到).
   for (let i = 0; i < synth.keyPoints.length; i++) {
     const kp = synth.keyPoints[i];
     const text = `${kp.title}\n${kp.content}`;
-    let emb: number[] | null = null;
-    try {
-      emb = await ai.embed(text);
-    } catch {
-      emb = null;
-    }
+    const emb = await ai.embed(text);
     items.push({
       workspaceId: topic.workspaceId,
       spaceId: topic.spaceId,
@@ -486,7 +526,12 @@ export async function indexTopicForSearch(
       embeddingDimension: dim
     });
   }
-  if (items.length > 0) await db.insert(documentChunks).values(items);
+  // Atomically swap old chunks for new ones inside a transaction: on insert
+  // failure the whole thing rolls back and the old chunks remain retrievable.
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`DELETE FROM document_chunks WHERE topic_id = ${topic.id}::uuid`);
+    if (items.length > 0) await tx.insert(documentChunks).values(items);
+  });
 }
 
 // LLM fuzzy judgment for the "ambiguous band" of embedding similarity. Returns
@@ -541,21 +586,37 @@ async function createMergeSuggestion(spaceId: string, a: { id: string; title: st
  *   5. synthesis is generated + validated, then the Topic is indexed
  * Candidates that lack sufficient evidence stay as candidates (no Topic).
  */
-export async function consolidateCandidates(spaceId: string, ai: AiProvider): Promise<{ createdTopics: number; mergeSuggestions: number }> {
+export async function consolidateCandidates(
+  spaceId: string,
+  ai: AiProvider,
+  onProgress?: (p: { done: number; total: number; stage: string }) => void | Promise<void>
+): Promise<{ createdTopics: number; mergeSuggestions: number }> {
   const candidates = await db
     .select()
     .from(topicCandidates)
     .where(and(eq(topicCandidates.spaceId, spaceId), eq(topicCandidates.status, 'candidate')));
   if (candidates.length === 0) return { createdTopics: 0, mergeSuggestions: 0 };
 
+  // Phase B (B1.2): bound the O(n^2) clustering cost so a large Space cannot
+  // hang the worker. Extra candidates stay as candidates for the next run.
+  const MAX_CANDIDATES = 500;
+  if (candidates.length > MAX_CANDIDATES) {
+    console.warn(`[consolidate] space ${spaceId}: ${candidates.length} candidates > ${MAX_CANDIDATES}; clustering first ${MAX_CANDIDATES} only.`);
+    candidates.length = MAX_CANDIDATES;
+  }
+
+  // Phase B (B1.1): load synonym map so "ML" / "机器学习" group together.
+  const synMap = await getSynonymMap(spaceId);
+  const norm = (t: string) => applySynonyms(t, synMap);
+
   // Existing accepted topics keyed by normalized title -> link candidates to them.
   const existing = await db.select().from(wikiTopics).where(eq(wikiTopics.spaceId, spaceId));
   const existingByNorm = new Map<string, (typeof existing)[number]>();
   for (const t of existing) {
-    const key = normalizeTitle(t.title);
+    const key = norm(t.title);
     if (!existingByNorm.has(key)) existingByNorm.set(key, t);
     for (const al of t.aliases ?? []) {
-      const ak = normalizeTitle(al);
+      const ak = norm(al);
       if (!existingByNorm.has(ak)) existingByNorm.set(ak, t);
     }
   }
@@ -563,42 +624,62 @@ export async function consolidateCandidates(spaceId: string, ai: AiProvider): Pr
   // Group candidates by normalized title (alias / synonym aggregation).
   const titleGroups = new Map<string, typeof candidates>();
   for (const c of candidates) {
-    const key = normalizeTitle(c.title);
+    const key = norm(c.title);
     if (!titleGroups.has(key)) titleGroups.set(key, []);
     titleGroups.get(key)!.push(c);
   }
 
-  // Phase 3 fix (E2): title-only grouping leaves "same concept, different
-  // wording" candidates in separate under-evidenced groups (each with 1 page /
-  // 1 chunk), which then never consolidate — and later get promoted one-by-one
-  // into many thin Topics (the "一篇出很多、每个一两句话" symptom). So we ALSO
-  // merge groups whose candidates are semantically near-duplicates: same source
-  // page, or high supporting-chunk term overlap. This lets a single rich page
-  // (or several related pages) consolidate into ONE multi-chunk Topic.
+  // Phase B (B1.2): embedding-dominated clustering.
+  //  - Hard group by normalized (synonym-aware) title: identical / synonym
+  //    titles are always one cluster (cheap, deterministic).
+  //  - Merge ACROSS title groups using the candidates' title embeddings:
+  //    cosine >= EMBED_MERGE (0.78) merges directly; the ambiguous band
+  //    [EMBED_LLM_BAND, 0.78) is resolved by the LLM fuzzy judge; below the
+  //    band they stay separate. This lets "机器学习" and "机器智能" (no synonym
+  //    entry) consolidate into ONE Topic — the core fix for "一篇出很多 topic".
+  //  - "Same source page" remains the strongest deterministic merge signal.
+  const EMBED_MERGE = 0.78;
+  const EMBED_LLM_BAND = 0.6;
+
   const groupList = [...titleGroups.values()];
   const parent = groupList.map((_, i) => i);
   const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
   const union = (x: number, y: number) => { const rx = find(x); const ry = find(y); if (rx !== ry) parent[ry] = rx; };
-  const supportCache = new Map<number, SupportChunk[]>();
-  const getSupport = async (gi: number): Promise<SupportChunk[]> => {
-    if (!supportCache.has(gi)) supportCache.set(gi, await getSupportChunks(groupList[gi].map((c) => c.chunkId)));
-    return supportCache.get(gi)!;
+
+  // Representative embedding for a group: first member with a stored title
+  // embedding, else best-effort fallback to a member's chunk embedding.
+  const groupRepEmbedding = async (g: typeof candidates): Promise<number[] | null> => {
+    for (const c of g) {
+      const e = parseVector(c.titleEmbedding);
+      if (e) return e;
+    }
+    for (const c of g) {
+      const e = await getChunkEmbedding(c.chunkId);
+      if (e) return e;
+    }
+    return null;
   };
+
   for (let i = 0; i < groupList.length; i++) {
     for (let j = i + 1; j < groupList.length; j++) {
       const a = groupList[i];
       const b = groupList[j];
       // Same source page -> almost certainly facets of one topic.
       const samePage = a.some((c) => b.some((d) => d.pageId === c.pageId));
-      let merge = samePage;
-      if (!merge) {
-        // High term overlap between the groups' supporting chunks.
-        const sa = await getSupport(i);
-        const sb = await getSupport(j);
-        const ov = groupSemanticOverlap([...sa, ...sb]);
-        if (ov >= 0.3) merge = true;
+      if (samePage) { union(i, j); continue; }
+      const ea = await groupRepEmbedding(a);
+      const eb = await groupRepEmbedding(b);
+      if (!ea || !eb) continue; // no embedding signal -> keep title groups only
+      const sim = cosineSimilarity(ea, eb);
+      if (sim >= EMBED_MERGE) { union(i, j); continue; }
+      if (sim >= EMBED_LLM_BAND) {
+        const d = await fuzzyMergeDecision(
+          { title: a[0].title, summary: a[0].summary },
+          { title: b[0].title, summary: b[0].summary },
+          ai
+        );
+        if (d === 'merge') union(i, j);
       }
-      if (merge) union(i, j);
     }
   }
   const merged = new Map<number, typeof candidates>();
@@ -607,18 +688,26 @@ export async function consolidateCandidates(spaceId: string, ai: AiProvider): Pr
     if (!merged.has(r)) merged.set(r, []);
     merged.get(r)!.push(...g);
   });
-  // Key the consolidated groups by the normalized title of their first member.
+  // Key the consolidated groups by the normalized (synonym-aware) title of their first member.
   const groups = new Map<string, typeof candidates>();
   for (const g of merged.values()) {
-    const key = normalizeTitle(g[0].title);
+    const key = norm(g[0].title);
     if (!groups.has(key)) groups.set(key, g);
     else groups.get(key)!.push(...g);
   }
 
+  // Phase B (B1.3): report clustering progress so an async worker can surface
+  // it on the job (the UI polls /api/jobs/:id). Total = number of clusters.
+  const totalGroups = groups.size;
+  await onProgress?.({ done: 0, total: totalGroups, stage: 'clustering' });
+
   let createdTopics = 0;
   let mergeSuggestions = 0;
 
-  for (const [norm, group] of groups) {
+  const groupEntries = [...groups.entries()];
+  for (let gi = 0; gi < groupEntries.length; gi++) {
+    const [norm, group] = groupEntries[gi];
+    await onProgress?.({ done: gi, total: totalGroups, stage: 'creating' });
     // Already have a Topic for this concept -> link candidates to it.
     const existingTopic = existingByNorm.get(norm);
     if (existingTopic) {
@@ -788,6 +877,7 @@ export async function generateWikiArtifacts(
     // Formal Topics are created later by promotion / Phase 3 clustering, so a
     // single short page never spawns multiple published Topics.
     const chunkId = await pickSupportingChunk(chunks, cand, candEmbs?.[i] ?? null);
+    const emb = candEmbs?.[i] ?? null;
     const [candidate] = await db.insert(topicCandidates).values({
       workspaceId: page.workspace_id,
       spaceId: page.space_id,
@@ -796,7 +886,10 @@ export async function generateWikiArtifacts(
       title: cand.title,
       summary: cand.summary,
       profile: { ...profile, summary: cand.summary || profile.summary },
-      status: 'candidate'
+      status: 'candidate',
+      // Phase B (B1.2): persist the title embedding so clustering can be
+      // embedding-dominated without recomputing it here.
+      titleEmbedding: emb ? sql`${vectorToSqlLiteral(emb)}::vector` : null
     }).returning();
 
     // Surface a candidate suggestion (medium risk) so the user can review /
@@ -872,11 +965,31 @@ export async function promoteCandidate(candidateId: string, userId: string): Pro
   if (!cand) throw new Error('candidate not found');
   if (cand.status === 'promoted' && cand.promotedTopicId) return { topicId: cand.promotedTopicId };
 
+  // Phase 3 consolidation for promotion: a page often produces multiple facet
+  // candidates. Promoting one should synthesize ONE rich Topic from the whole
+  // page's evidence, not a single-chunk thin Topic.
+  // Phase B (B1.4): only promote the selected candidate + its *synonym-cluster*
+  // mates (candidates that resolve to the same normalized concept), NOT every
+  // candidate on the page. The remaining candidates stay as candidates for
+  // later clustering instead of being force-merged into one Topic.
+  const synMap = await getSynonymMap(cand.workspaceId);
+  const selectedNorm = applySynonyms(cand.title, synMap);
+  const pageCands = await db
+    .select()
+    .from(topicCandidates)
+    .where(and(eq(topicCandidates.pageId, cand.pageId), eq(topicCandidates.status, 'candidate')));
+  const siblings = pageCands.filter((c) => applySynonyms(c.title, synMap) === selectedNorm);
+
+  const siblingIds = siblings.map((c) => c.id);
+  const chunkIds = siblings.map((c) => c.chunkId).filter((x): x is string => !!x);
+  const support = chunkIds.length > 0 ? await getSupportChunks(chunkIds) : [];
+
   // Phase 3 (D3): a promoted Topic carries a valid TopicSynthesis (overview /
   // keyPoints / citations) rather than an empty doc. Built deterministically
-  // from the candidate's supporting chunk so it is always valid + citable.
-  const support = await getSupportChunks([cand.chunkId]);
-  const synth = support.length > 0 ? buildDeterministicSynthesis(support) : buildDeterministicSynthesis([{ chunkId: cand.chunkId ?? 'missing', pageId: cand.pageId, content: cand.summary || cand.title, contentVersion: 1 }]);
+  // from all supporting chunks so it is always valid + citable.
+  const synth = support.length > 0
+    ? buildDeterministicSynthesis(support)
+    : buildDeterministicSynthesis([{ chunkId: cand.chunkId ?? 'missing', pageId: cand.pageId, content: cand.summary || cand.title, contentVersion: 1 }]);
 
   const [topic] = await db.insert(wikiTopics).values({
     workspaceId: cand.workspaceId,
@@ -897,7 +1010,14 @@ export async function promoteCandidate(candidateId: string, userId: string): Pro
     lifecycleStatus: 'active'
   }).returning();
 
-  await db.insert(topicSources).values({ topicId: topic.id, pageId: cand.pageId, chunkId: cand.chunkId, addedBy: 'ai', contributionType: 'key_point' }).onConflictDoNothing();
+  // Record every sibling chunk as a source of the consolidated Topic.
+  for (const c of siblings) {
+    if (c.chunkId) {
+      await db.insert(topicSources).values({
+        topicId: topic.id, pageId: c.pageId, chunkId: c.chunkId, addedBy: 'ai', contributionType: 'key_point'
+      }).onConflictDoNothing();
+    }
+  }
 
   // M6: the topic "covers" the page it was derived from -> a graph edge.
   await upsertEdge({
@@ -906,17 +1026,25 @@ export async function promoteCandidate(candidateId: string, userId: string): Pro
     relationType: 'covers', confidence: 70, evidence: { generatedFrom: cand.title, fromCandidate: cand.id }
   });
 
-  await db.update(topicCandidates)
-    .set({ status: 'promoted', promotedTopicId: topic.id, updatedAt: sql`now()` })
-    .where(eq(topicCandidates.id, candidateId));
+  // Mark all sibling candidates as promoted into this single Topic.
+  if (siblingIds.length > 0) {
+    await db.execute(sql`
+      UPDATE topic_candidates
+      SET status = 'promoted', promoted_topic_id = ${topic.id}, updated_at = now()
+      WHERE id = ANY(ARRAY[${sql.join(siblingIds.map((id) => sql`${id}::uuid`), sql`, `)}])
+    `);
+  }
 
-  // Resolve the pending candidate suggestion now that it has been promoted.
-  await db.execute(sql`
-    UPDATE llm_suggestions SET status = 'ignored', updated_at = now()
-    WHERE payload ->> 'candidateId' = ${candidateId}::text AND type = 'topic_candidate' AND status = 'pending'
-  `);
+  // Resolve pending candidate suggestions for all siblings.
+  if (siblingIds.length > 0) {
+    await db.execute(sql`
+      UPDATE llm_suggestions SET status = 'ignored', updated_at = now()
+      WHERE type = 'topic_candidate' AND status = 'pending'
+        AND payload ->> 'candidateId' = ANY(ARRAY[${sql.join(siblingIds.map((id) => sql`${id}::text`), sql`, `)}])
+    `);
+  }
 
-  // Index the promoted Topic for RAG / full-text retrieval.
+  // Index the consolidated Topic for RAG / full-text retrieval.
   try {
     const ai = await createAiProviderForContext({ workspaceId: cand.workspaceId, spaceId: cand.spaceId });
     await indexTopicForSearch(topic, synth, ai);
@@ -1411,18 +1539,9 @@ export async function mergeTopics(survivorId: string, mergedId: string, userId: 
   for (const row of mergedSources.rows) {
     if (survivorSourcePages.has(row.page_id)) {
       droppedRows.push(row);
-      await db.execute(sql`DELETE FROM topic_sources WHERE topic_id = ${mergedId} AND page_id = ${row.page_id}::uuid`);
     } else {
       movedKeys.push(row.page_id);
-      await db.execute(sql`UPDATE topic_sources SET topic_id = ${survivorId}::uuid WHERE topic_id = ${mergedId} AND page_id = ${row.page_id}::uuid`);
     }
-  }
-
-  // Move the merged Topic's RAG chunks to the survivor (so search keeps it).
-  const chunkRows = await db.execute<any>(sql`SELECT id FROM document_chunks WHERE topic_id = ${mergedId}`);
-  const chunkIds = chunkRows.rows.map((r: { id: string }) => r.id);
-  if (chunkIds.length > 0) {
-    await db.execute(sql`UPDATE document_chunks SET topic_id = ${survivorId}::uuid WHERE topic_id = ${mergedId} AND id = ANY(ARRAY[${sql.join(chunkIds.map((id) => sql`${id}::uuid`), sql`, `)}])`);
   }
 
   // Alias the merged title into the survivor for future clustering.
@@ -1431,17 +1550,60 @@ export async function mergeTopics(survivorId: string, mergedId: string, userId: 
   if (!survivorAliases.includes(mergedNorm)) survivorAliases.push(mergedNorm);
   // Build a Postgres text[] literal (raw SQL needs explicit array syntax).
   const aliasLiteral = `{${survivorAliases.map((a) => `"${a.replace(/"/g, '\\"')}"`).join(',')}}`;
-  await db.execute(sql`UPDATE wiki_topics SET aliases = ${aliasLiteral}::text[] WHERE id = ${survivorId}`);
 
-  // Turn the merged topic into a redirect stub.
-  await db.execute(sql`
-    UPDATE wiki_topics
-    SET merged_into_topic_id = ${survivorId}::uuid, merged_at = now(), merged_by_id = ${userId}::uuid,
-        lifecycle_status = 'archived', status = 'archived', freshness_status = 'fresh', updated_at = now()
-    WHERE id = ${mergedId}
-  `);
+  // All data mutations run inside ONE transaction so a mid-merge failure leaves
+  // no "half-merged" orphan state (Gate: 合并可完整回滚). The (network) reindex
+  // is deliberately performed AFTER commit, best-effort.
+  const [op] = await db.transaction(async (tx) => {
+    // Move provenance: delete duplicate sources, re-point the rest to survivor.
+    for (const row of droppedRows) {
+      await tx.execute(sql`DELETE FROM topic_sources WHERE topic_id = ${mergedId} AND page_id = ${row.page_id}::uuid`);
+    }
+    for (const pageId of movedKeys) {
+      await tx.execute(sql`UPDATE topic_sources SET topic_id = ${survivorId}::uuid WHERE topic_id = ${mergedId} AND page_id = ${pageId}::uuid`);
+    }
 
-  // Re-index the survivor (now carries the merged chunks).
+    // Move the merged Topic's RAG chunks to the survivor (so search keeps it).
+    const chunkRows = await tx.execute<any>(sql`SELECT id FROM document_chunks WHERE topic_id = ${mergedId}`);
+    const chunkIds = chunkRows.rows.map((r: { id: string }) => r.id);
+    if (chunkIds.length > 0) {
+      await tx.execute(sql`UPDATE document_chunks SET topic_id = ${survivorId}::uuid WHERE topic_id = ${mergedId} AND id = ANY(ARRAY[${sql.join(chunkIds.map((id) => sql`${id}::uuid`), sql`, `)}])`);
+    }
+
+    // Update survivor aliases.
+    await tx.execute(sql`UPDATE wiki_topics SET aliases = ${aliasLiteral}::text[] WHERE id = ${survivorId}`);
+
+    // Turn the merged topic into a redirect stub.
+    await tx.execute(sql`
+      UPDATE wiki_topics
+      SET merged_into_topic_id = ${survivorId}::uuid, merged_at = now(), merged_by_id = ${userId}::uuid,
+          lifecycle_status = 'archived', status = 'archived', freshness_status = 'fresh', updated_at = now()
+      WHERE id = ${mergedId}
+    `);
+
+    // Audit record (reversible: re-point chunks + sources back, restore stub).
+    const [operation] = await tx
+      .insert(topicOperations)
+      .values({
+        workspaceId: s.workspace_id,
+        spaceId: s.space_id,
+        operationType: 'merge',
+        topicId: mergedId,
+        targetTopicId: survivorId,
+        createdById: userId,
+        payload: {
+          movedKeys,
+          droppedRows,
+          chunkIds,
+          previousMerged: { lifecycleStatus: m.lifecycle_status, status: m.status, publicationStatus: m.publication_status, title: m.title }
+        }
+      })
+      .returning();
+    return [operation];
+  });
+
+  // Re-index the survivor (now carries the merged chunks). Network call kept
+  // OUTSIDE the transaction: a reindex failure must not roll back the merge.
   try {
     const ai = await createAiProviderForContext({ workspaceId: s.workspace_id, spaceId: s.space_id });
     const sSynth = (s.content_json ?? {}) as TopicSynthesis;
@@ -1454,24 +1616,6 @@ export async function mergeTopics(survivorId: string, mergedId: string, userId: 
 
   // The survivor gained the merged Topic's provenance — a real user-driven change.
   await recordActivity({ workspaceId: s.workspace_id, spaceId: s.space_id, entityType: 'topic', entityId: survivorId, eventType: 'added_to_source', userId, metadata: { fromMerge: mergedId } });
-
-  const [op] = await db
-    .insert(topicOperations)
-    .values({
-      workspaceId: s.workspace_id,
-      spaceId: s.space_id,
-      operationType: 'merge',
-      topicId: mergedId,
-      targetTopicId: survivorId,
-      createdById: userId,
-      payload: {
-        movedKeys,
-        droppedRows,
-        chunkIds,
-        previousMerged: { lifecycleStatus: m.lifecycle_status, status: m.status, publicationStatus: m.publication_status, title: m.title }
-      }
-    })
-    .returning();
 
   return { operationId: op.id };
 }
@@ -1507,59 +1651,79 @@ export async function splitTopic(topicId: string, newTitle: string, keyPointIds:
   };
   const parentSynth: TopicSynthesis = { ...synth, keyPoints: synth.keyPoints.filter((k) => !keyPointIds.includes(k.id)) };
 
-  const [newTopic] = await db
-    .insert(wikiTopics)
-    .values({
-      workspaceId: topic.workspace_id,
-      spaceId: topic.space_id,
-      title: newTitle,
-      contentJson: newSynth as unknown,
-      textContent: extractTextFromSynthesis(newSynth),
-      status: 'accepted',
-      source: 'ai_generated',
-      aiSummary: newSynth.definition || newSynth.overview.slice(0, 200),
-      aliases: [normalizeTitle(newTitle)],
-      normalizedTitle: normalizeTitle(newTitle),
-      synthesisVersion: 'topic-synthesis-v1',
-      createdById: userId,
-      promotedFromTopicId: topicId,
-      originSpaceId: topic.space_id,
-      publicationStatus: 'accepted',
-      freshnessStatus: 'fresh',
-      lifecycleStatus: 'active'
-    })
-    .returning();
+  // All data mutations run inside ONE transaction so a mid-split failure leaves
+  // no orphan Topic / half-updated parent (Gate: 拆分可完整回滚). Reindex is
+  // performed AFTER commit, best-effort.
+  const [newTopic, op] = await db.transaction(async (tx) => {
+    const [nt] = await tx
+      .insert(wikiTopics)
+      .values({
+        workspaceId: topic.workspace_id,
+        spaceId: topic.space_id,
+        title: newTitle,
+        contentJson: newSynth as unknown,
+        textContent: extractTextFromSynthesis(newSynth),
+        status: 'accepted',
+        source: 'ai_generated',
+        aiSummary: newSynth.definition || newSynth.overview.slice(0, 200),
+        aliases: [normalizeTitle(newTitle)],
+        normalizedTitle: normalizeTitle(newTitle),
+        synthesisVersion: 'topic-synthesis-v1',
+        createdById: userId,
+        promotedFromTopicId: topicId,
+        originSpaceId: topic.space_id,
+        publicationStatus: 'accepted',
+        freshnessStatus: 'fresh',
+        lifecycleStatus: 'active'
+      })
+      .returning();
 
-  // Inherit the parent's source provenance for the new Topic.
-  const sources = await db.execute<any>(sql`SELECT page_id, chunk_id, source_content_version, source_type, relevance_score, evidence_excerpt, added_by, contribution_type FROM topic_sources WHERE topic_id = ${topicId}`);
-  if (sources.rows.length > 0) {
-    await db.insert(topicSources).values(
-      sources.rows.map((r: Record<string, unknown>) => ({
-        topicId: newTopic.id,
-        pageId: r.page_id as string,
-        chunkId: (r.chunk_id as string) ?? null,
-        sourceContentVersion: (r.source_content_version as number) ?? null,
-        sourceType: (r.source_type as string) ?? 'page',
-        relevanceScore: (r.relevance_score as number) ?? null,
-        evidenceExcerpt: (r.evidence_excerpt as string) ?? null,
-        addedBy: (r.added_by as string) ?? 'ai',
-        contributionType: (r.contribution_type as string) ?? 'key_point'
-      }))
-    );
-  }
+    // Inherit the parent's source provenance for the new Topic.
+    const sources = await tx.execute<any>(sql`SELECT page_id, chunk_id, source_content_version, source_type, relevance_score, evidence_excerpt, added_by, contribution_type FROM topic_sources WHERE topic_id = ${topicId}`);
+    if (sources.rows.length > 0) {
+      await tx.insert(topicSources).values(
+        sources.rows.map((r: Record<string, unknown>) => ({
+          topicId: nt.id,
+          pageId: r.page_id as string,
+          chunkId: (r.chunk_id as string) ?? null,
+          sourceContentVersion: (r.source_content_version as number) ?? null,
+          sourceType: (r.source_type as string) ?? 'page',
+          relevanceScore: (r.relevance_score as number) ?? null,
+          evidenceExcerpt: (r.evidence_excerpt as string) ?? null,
+          addedBy: (r.added_by as string) ?? 'ai',
+          contributionType: (r.contribution_type as string) ?? 'key_point'
+        }))
+      );
+    }
+
+    // Parent loses the extracted keyPoints.
+    await tx.execute(sql`
+      UPDATE wiki_topics
+      SET content_json = ${JSON.stringify(parentSynth)}::jsonb, text_content = ${extractTextFromSynthesis(parentSynth)},
+          ai_summary = ${(parentSynth.definition || parentSynth.overview).slice(0, 500)}, updated_at = now()
+      WHERE id = ${topicId}
+    `);
+
+    const [operation] = await tx
+      .insert(topicOperations)
+      .values({
+        workspaceId: topic.workspace_id,
+        spaceId: topic.space_id,
+        operationType: 'split',
+        topicId,
+        targetTopicId: nt.id,
+        createdById: userId,
+        payload: { extractedKeyPointIds: keyPointIds, newTitle, parentSynthesisBefore: synth }
+      })
+      .returning();
+
+    return [nt, operation];
+  });
 
   // The split spawned a Topic carrying inherited sources — a real user action.
   await recordActivity({ workspaceId: topic.workspace_id, spaceId: topic.space_id, entityType: 'topic', entityId: newTopic.id, eventType: 'added_to_source', userId, metadata: { fromSplit: topicId } });
 
-  // Parent loses the extracted keyPoints.
-  await db.execute(sql`
-    UPDATE wiki_topics
-    SET content_json = ${JSON.stringify(parentSynth)}::jsonb, text_content = ${extractTextFromSynthesis(parentSynth)},
-        ai_summary = ${(parentSynth.definition || parentSynth.overview).slice(0, 500)}, updated_at = now()
-    WHERE id = ${topicId}
-  `);
-
-  // Re-index both topics for RAG.
+  // Re-index both topics for RAG (network call outside the transaction).
   try {
     const ai = await createAiProviderForContext({ workspaceId: topic.workspace_id, spaceId: topic.space_id });
     await indexTopicForSearch(newTopic, newSynth, ai);
@@ -1567,19 +1731,6 @@ export async function splitTopic(topicId: string, newTitle: string, keyPointIds:
   } catch {
     /* best-effort */
   }
-
-  const [op] = await db
-    .insert(topicOperations)
-    .values({
-      workspaceId: topic.workspace_id,
-      spaceId: topic.space_id,
-      operationType: 'split',
-      topicId,
-      targetTopicId: newTopic.id,
-      createdById: userId,
-      payload: { extractedKeyPointIds: keyPointIds, newTitle, parentSynthesisBefore: synth }
-    })
-    .returning();
 
   return { topicId: newTopic.id, operationId: op.id };
 }
@@ -1597,51 +1748,93 @@ export async function undoTopicOperation(operationId: string, userId: string): P
   if (!op) throw new Error('operation not found');
   if (op.undoneAt) return; // already undone
 
-  if (op.operationType === 'merge') {
-    const mergedId = op.topicId!;
-    const survivorId = op.targetTopicId!;
-    const p = (op.payload ?? {}) as {
-      movedKeys?: string[];
-      droppedRows?: Record<string, unknown>[];
-      chunkIds?: string[];
-      previousMerged?: { lifecycleStatus: string; status: string; publicationStatus: string; title: string };
-    };
-    // Move chunks back to the merged topic.
-    if (p.chunkIds?.length) {
-      await db.execute(sql`UPDATE document_chunks SET topic_id = ${mergedId}::uuid WHERE topic_id = ${survivorId} AND id = ANY(ARRAY[${sql.join(p.chunkIds.map((id) => sql`${id}::uuid`), sql`, `)}])`);
+  // IDs needed for the post-commit re-index (network calls stay outside the tx).
+  let mergedId: string | undefined;
+  let survivorId: string | undefined;
+  let parentId: string | undefined;
+  const p = (op.payload ?? {}) as {
+    movedKeys?: string[];
+    droppedRows?: Record<string, unknown>[];
+    chunkIds?: string[];
+    previousMerged?: { lifecycleStatus: string; status: string; publicationStatus: string; title: string };
+    parentSynthesisBefore?: TopicSynthesis;
+  };
+
+  // Every restoration write runs inside ONE transaction so an interrupted undo
+  // cannot leave a half-restored Topic (Gate: 撤销可完整回滚). Reindex happens
+  // after commit, best-effort.
+  await db.transaction(async (tx) => {
+    if (op.operationType === 'merge') {
+      mergedId = op.topicId!;
+      survivorId = op.targetTopicId!;
+      // Move chunks back to the merged topic.
+      if (p.chunkIds?.length) {
+        await tx.execute(sql`UPDATE document_chunks SET topic_id = ${mergedId}::uuid WHERE topic_id = ${survivorId} AND id = ANY(ARRAY[${sql.join(p.chunkIds.map((id) => sql`${id}::uuid`), sql`, `)}])`);
+      }
+      // Move the (previously moved) sources back.
+      if (p.movedKeys?.length) {
+        await tx.execute(sql`UPDATE topic_sources SET topic_id = ${mergedId}::uuid WHERE topic_id = ${survivorId} AND page_id = ANY(ARRAY[${sql.join(p.movedKeys.map((id) => sql`${id}::uuid`), sql`, `)}])`);
+      }
+      // Re-insert the dropped (duplicate) sources under the merged topic.
+      for (const row of p.droppedRows ?? []) {
+        await tx.insert(topicSources).values({
+          topicId: mergedId,
+          pageId: row.page_id as string,
+          chunkId: (row.chunk_id as string) ?? null,
+          sourceContentVersion: (row.source_content_version as number) ?? null,
+          sourceType: (row.source_type as string) ?? 'page',
+          relevanceScore: (row.relevance_score as number) ?? null,
+          evidenceExcerpt: (row.evidence_excerpt as string) ?? null,
+          addedBy: (row.added_by as string) ?? 'ai',
+          contributionType: (row.contribution_type as string) ?? 'key_point'
+        }).onConflictDoNothing();
+      }
+      // Restore the merged topic from its redirect-stub state.
+      const prev = p.previousMerged;
+      await tx.execute(sql`
+        UPDATE wiki_topics
+        SET merged_into_topic_id = NULL, merged_at = NULL, merged_by_id = NULL,
+            lifecycle_status = ${prev?.lifecycleStatus ?? 'active'},
+            status = ${prev?.status ?? 'accepted'},
+            publication_status = ${prev?.publicationStatus ?? 'accepted'},
+            updated_at = now()
+        WHERE id = ${mergedId}
+      `);
+    } else if (op.operationType === 'split') {
+      parentId = op.topicId!;
+      const newTopicId = op.targetTopicId!;
+      // Delete the spawned topic and its chunks / sources.
+      await tx.execute(sql`DELETE FROM document_chunks WHERE topic_id = ${newTopicId}::uuid`);
+      await tx.execute(sql`DELETE FROM topic_sources WHERE topic_id = ${newTopicId}::uuid`);
+      await tx.execute(sql`DELETE FROM wiki_topics WHERE id = ${newTopicId}::uuid`);
+      // Restore the parent's pre-split synthesis.
+      if (p.parentSynthesisBefore) {
+        await tx.execute(sql`
+          UPDATE wiki_topics
+          SET content_json = ${JSON.stringify(p.parentSynthesisBefore)}::jsonb,
+              text_content = ${extractTextFromSynthesis(p.parentSynthesisBefore)},
+              ai_summary = ${(p.parentSynthesisBefore.definition || p.parentSynthesisBefore.overview).slice(0, 500)},
+              updated_at = now()
+          WHERE id = ${parentId}
+        `);
+      }
+    } else if (op.operationType === 'derive') {
+      // Derive copies the original (which is left untouched), so undo simply
+      // removes the derived Topic and its chunks / sources. Nothing to restore on
+      // the original — its history stays fully intact (gate: 原项目历史完整).
+      const derivedId = op.targetTopicId!;
+      await tx.execute(sql`DELETE FROM document_chunks WHERE topic_id = ${derivedId}::uuid`);
+      await tx.execute(sql`DELETE FROM topic_sources WHERE topic_id = ${derivedId}::uuid`);
+      await tx.execute(sql`DELETE FROM wiki_topics WHERE id = ${derivedId}::uuid`);
     }
-    // Move the (previously moved) sources back.
-    if (p.movedKeys?.length) {
-      await db.execute(sql`UPDATE topic_sources SET topic_id = ${mergedId}::uuid WHERE topic_id = ${survivorId} AND page_id = ANY(ARRAY[${sql.join(p.movedKeys.map((id) => sql`${id}::uuid`), sql`, `)}])`);
-    }
-    // Re-insert the dropped (duplicate) sources under the merged topic.
-    for (const row of p.droppedRows ?? []) {
-      await db.insert(topicSources).values({
-        topicId: mergedId,
-        pageId: row.page_id as string,
-        chunkId: (row.chunk_id as string) ?? null,
-        sourceContentVersion: (row.source_content_version as number) ?? null,
-        sourceType: (row.source_type as string) ?? 'page',
-        relevanceScore: (row.relevance_score as number) ?? null,
-        evidenceExcerpt: (row.evidence_excerpt as string) ?? null,
-        addedBy: (row.added_by as string) ?? 'ai',
-        contributionType: (row.contribution_type as string) ?? 'key_point'
-      }).onConflictDoNothing();
-    }
-    // Restore the merged topic from its redirect-stub state.
-    const prev = p.previousMerged;
-    await db.execute(sql`
-      UPDATE wiki_topics
-      SET merged_into_topic_id = NULL, merged_at = NULL, merged_by_id = NULL,
-          lifecycle_status = ${prev?.lifecycleStatus ?? 'active'},
-          status = ${prev?.status ?? 'accepted'},
-          publication_status = ${prev?.publicationStatus ?? 'accepted'},
-          updated_at = now()
-      WHERE id = ${mergedId}
-    `);
-    // Re-index both topics.
-    try {
-      const ai = await createAiProviderForContext({ workspaceId: op.workspaceId, spaceId: op.spaceId });
+
+    await tx.execute(sql`UPDATE topic_operations SET undone_at = now(), undone_by_id = ${userId}::uuid WHERE id = ${operationId}`);
+  });
+
+  // Re-index AFTER commit (network calls outside the transaction).
+  try {
+    const ai = await createAiProviderForContext({ workspaceId: op.workspaceId, spaceId: op.spaceId });
+    if (op.operationType === 'merge') {
       const mergedRow = (await db.execute<any>(sql`SELECT * FROM wiki_topics WHERE id = ${mergedId} LIMIT 1`)).rows[0];
       const survivorRow = (await db.execute<any>(sql`SELECT * FROM wiki_topics WHERE id = ${survivorId} LIMIT 1`)).rows[0];
       if (mergedRow && (mergedRow.content_json ?? {}).schemaVersion === 'topic-synthesis-v1') {
@@ -1650,46 +1843,13 @@ export async function undoTopicOperation(operationId: string, userId: string): P
       if (survivorRow && (survivorRow.content_json ?? {}).schemaVersion === 'topic-synthesis-v1') {
         await indexTopicForSearch({ id: survivorRow.id, workspaceId: survivorRow.workspace_id, spaceId: survivorRow.space_id, title: survivorRow.title }, survivorRow.content_json as TopicSynthesis, ai);
       }
-    } catch {
-      /* best-effort */
+    } else if (op.operationType === 'split' && p.parentSynthesisBefore) {
+      const parentRow = (await db.execute<any>(sql`SELECT * FROM wiki_topics WHERE id = ${parentId} LIMIT 1`)).rows[0];
+      await indexTopicForSearch({ id: parentRow.id, workspaceId: parentRow.workspace_id, spaceId: parentRow.space_id, title: parentRow.title }, p.parentSynthesisBefore, ai);
     }
-  } else if (op.operationType === 'split') {
-    const parentId = op.topicId!;
-    const newTopicId = op.targetTopicId!;
-    const p = (op.payload ?? {}) as { parentSynthesisBefore?: TopicSynthesis };
-    // Delete the spawned topic and its chunks / sources.
-    await db.execute(sql`DELETE FROM document_chunks WHERE topic_id = ${newTopicId}::uuid`);
-    await db.execute(sql`DELETE FROM topic_sources WHERE topic_id = ${newTopicId}::uuid`);
-    await db.execute(sql`DELETE FROM wiki_topics WHERE id = ${newTopicId}::uuid`);
-    // Restore the parent's pre-split synthesis.
-    if (p.parentSynthesisBefore) {
-      await db.execute(sql`
-        UPDATE wiki_topics
-        SET content_json = ${JSON.stringify(p.parentSynthesisBefore)}::jsonb,
-            text_content = ${extractTextFromSynthesis(p.parentSynthesisBefore)},
-            ai_summary = ${(p.parentSynthesisBefore.definition || p.parentSynthesisBefore.overview).slice(0, 500)},
-            updated_at = now()
-        WHERE id = ${parentId}
-      `);
-      try {
-        const ai = await createAiProviderForContext({ workspaceId: op.workspaceId, spaceId: op.spaceId });
-        const parentRow = (await db.execute<any>(sql`SELECT * FROM wiki_topics WHERE id = ${parentId} LIMIT 1`)).rows[0];
-        await indexTopicForSearch({ id: parentRow.id, workspaceId: parentRow.workspace_id, spaceId: parentRow.space_id, title: parentRow.title }, p.parentSynthesisBefore, ai);
-      } catch {
-        /* best-effort */
-      }
-    }
-  } else if (op.operationType === 'derive') {
-    // Derive copies the original (which is left untouched), so undo simply
-    // removes the derived Topic and its chunks / sources. Nothing to restore on
-    // the original — its history stays fully intact (gate: 原项目历史完整).
-    const derivedId = op.targetTopicId!;
-    await db.execute(sql`DELETE FROM document_chunks WHERE topic_id = ${derivedId}::uuid`);
-    await db.execute(sql`DELETE FROM topic_sources WHERE topic_id = ${derivedId}::uuid`);
-    await db.execute(sql`DELETE FROM wiki_topics WHERE id = ${derivedId}::uuid`);
+  } catch {
+    /* best-effort */
   }
-
-  await db.execute(sql`UPDATE topic_operations SET undone_at = now(), undone_by_id = ${userId}::uuid WHERE id = ${operationId}`);
 }
 
 /* ------------------------------------------- Phase 5: archive center -------- */
@@ -1726,4 +1886,25 @@ export async function reactivateTopic(topicId: string, userId: string): Promise<
     WHERE id = ${topicId}::uuid
   `);
   await recordActivity({ workspaceId: topic.workspace_id, spaceId: topic.space_id, entityType: 'topic', entityId: topicId, eventType: 'view', userId, metadata: { reactivated: true } });
+}
+
+/**
+ * Phase B (B2.3): soft-delete a Topic. We NEVER hard-delete — deletion is an
+ * archive with reason 'deleted' (plus deleted_at/deleted_by_id) so the Topic
+ * stays auditable and recoverable via `reactivateTopic`. It is therefore hidden
+ * from the default list (which excludes lifecycle='archived') but still
+ * reachable through `?lifecycle=archived`.
+ */
+export async function deleteTopic(topicId: string, userId: string): Promise<void> {
+  const [topic] = await db.execute<any>(sql`SELECT * FROM wiki_topics WHERE id = ${topicId} LIMIT 1`).then((r) => [r.rows[0]]);
+  if (!topic) throw new Error('topic not found');
+  await db.execute(sql`
+    UPDATE wiki_topics
+    SET lifecycle_status = 'archived', status = 'archived',
+        archived_at = now(), archived_by_id = ${userId}::uuid, archive_reason = 'deleted',
+        deleted_at = now(), deleted_by_id = ${userId}::uuid,
+        updated_at = now()
+    WHERE id = ${topicId}::uuid
+  `);
+  await recordActivity({ workspaceId: topic.workspace_id, spaceId: topic.space_id, entityType: 'topic', entityId: topicId, eventType: 'view', userId, metadata: { deleted: true } });
 }

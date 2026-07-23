@@ -91,7 +91,9 @@ spaceRoutes.post('/:id/complete', async (c) => {
 spaceRoutes.delete('/:id', async (c) => {
   const user = c.get('user');
   const id = c.req.param('id');
-  if (!(await canManageWorkspace(user.id, (await db.select().from(spaces).where(eq(spaces.id, id)).limit(1))[0]?.workspaceId ?? ''))) return c.json({ error: 'Forbidden' }, 403);
+  const [space] = await db.select().from(spaces).where(eq(spaces.id, id)).limit(1);
+  if (!space) return c.json({ error: 'Not found' }, 404);
+  if (!(await canManageWorkspace(user.id, space.workspaceId))) return c.json({ error: 'Forbidden' }, 403);
   await db.delete(spaces).where(eq(spaces.id, id));
   return c.json({ ok: true });
 });

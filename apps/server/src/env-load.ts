@@ -14,7 +14,6 @@ import { resolve, dirname } from 'node:path';
  */
 function findEnvFile(): string | null {
   let dir = process.cwd();
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const candidate = resolve(dir, '.env');
     if (existsSync(candidate)) return candidate;

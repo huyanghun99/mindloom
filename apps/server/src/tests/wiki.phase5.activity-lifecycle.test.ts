@@ -3,7 +3,8 @@ import { MockAiProvider } from '@mindloom/ai';
 import { db, sql, makeUser, makeWorkspace, makeSpace, cleanDb, sessionCookie, runPendingJob } from './test-utils';
 import { createApp } from '../app';
 import { wikiTopics, spaces, knowledgeEdges } from '@mindloom/db';
-import { hybridSearch, indexTopicForSearch } from '../services/search.service';
+import { hybridSearch } from '../services/search.service';
+import { indexTopicForSearch } from '../services/wiki.service';
 import { recordActivity, getActivityStats } from '../services/activity.service';
 import { evaluateLifecycle } from '../services/lifecycle.service';
 import type { TopicSynthesis } from '@mindloom/shared';
@@ -111,13 +112,13 @@ describe('Phase 5 — activity & lifecycle', () => {
     const past = new Date(Date.now() - 200 * DAY);
 
     // 1) pinned
-    await makeTopic(area, user, { title: 'Pinned', kp: 'Pinned', pinned: true, lastMeaningfulActivityAt: past });
+    const pinned = await makeTopic(area, user, { title: 'Pinned', kp: 'Pinned', pinned: true, lastMeaningfulActivityAt: past });
     // 2) user_edited
-    await makeTopic(area, user, { title: 'UserEdited', kp: 'UserEdited', publicationStatus: 'user_edited', lastMeaningfulActivityAt: past });
+    const userEdited = await makeTopic(area, user, { title: 'UserEdited', kp: 'UserEdited', publicationStatus: 'user_edited', lastMeaningfulActivityAt: past });
     // 3) keepActiveUntil in the future
-    await makeTopic(area, user, { title: 'KeepActive', kp: 'KeepActive', keepActiveUntil: new Date(Date.now() + 10 * DAY), lastMeaningfulActivityAt: past });
+    const keepActive = await makeTopic(area, user, { title: 'KeepActive', kp: 'KeepActive', keepActiveUntil: new Date(Date.now() + 10 * DAY), lastMeaningfulActivityAt: past });
     // 4) has an unhandled stale flag
-    await makeTopic(area, user, { title: 'Stale', kp: 'Stale', freshnessStatus: 'stale', lastMeaningfulActivityAt: past });
+    const stale = await makeTopic(area, user, { title: 'Stale', kp: 'Stale', freshnessStatus: 'stale', lastMeaningfulActivityAt: past });
 
     // 5) referenced by an active project
     const proj = await makeSpace(ws, user, 'proj', 'cloud_allowed');
@@ -134,12 +135,22 @@ describe('Phase 5 — activity & lifecycle', () => {
     });
 
     // 6) unprotected, 200 days inactive -> SHOULD be suggested for archive
-    const unprotected = await makeTopic(area, user, { title: 'Inactive', kp: 'Inactive', lastMeaningfulActivityAt: past });
+    const inactive = await makeTopic(area, user, { title: 'Inactive', kp: 'Inactive', lastMeaningfulActivityAt: past });
 
     const { suggestions } = await evaluateLifecycle(ws.id, area.id);
 
+    // Suggestions carry topicId (a UUID), not the title — map it back to the
+    // title we assigned so the assertions check the right Topic.
+    const titleById = new Map<string, string>([
+      [pinned.id, 'Pinned'],
+      [userEdited.id, 'UserEdited'],
+      [keepActive.id, 'KeepActive'],
+      [stale.id, 'Stale'],
+      [refTarget.id, 'Referenced'],
+      [inactive.id, 'Inactive']
+    ]);
     const archivedFor = (topicTitle: string) =>
-      suggestions.filter((s) => s.type === 'lifecycle_archive' && s.topicId === topicTitle);
+      suggestions.filter((s) => s.type === 'lifecycle_archive' && titleById.get(s.topicId) === topicTitle);
 
     expect(archivedFor('Pinned')).toHaveLength(0);
     expect(archivedFor('UserEdited')).toHaveLength(0);
@@ -151,7 +162,7 @@ describe('Phase 5 — activity & lifecycle', () => {
 
     // Idempotent: re-running does not stack duplicate suggestions.
     const { suggestions: second } = await evaluateLifecycle(ws.id, area.id);
-    expect(second.filter((s) => s.type === 'lifecycle_archive' && s.topicId === 'Inactive')).toHaveLength(1);
+    expect(second.filter((s) => s.type === 'lifecycle_archive' && titleById.get(s.topicId) === 'Inactive')).toHaveLength(1);
   });
 
   /* ---- Gate 3: archived 降权但可查 (archived down-weighted but queryable) ---- */

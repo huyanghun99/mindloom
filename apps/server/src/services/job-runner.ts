@@ -36,11 +36,11 @@ type Executor = any;
  * *active* (pending/running) job with the same key is cancelled first, so only
  * the latest version of a page/topic stays queued. No Redis / BullMQ involved.
  */
-export async function enqueueJob(input: EnqueueInput, exec: Executor = db): Promise<void> {
+export async function enqueueJob(input: EnqueueInput, exec: Executor = db): Promise<{ jobId: string }> {
   const dedupeKey =
     input.dedupeKey ?? (input.entityId ? `${input.entityType}:${input.entityId}:${input.type}` : undefined);
 
-  const doEnqueue = async (tx: Executor) => {
+  const doEnqueue = async (tx: Executor): Promise<{ jobId: string }> => {
     if (dedupeKey) {
       await tx
         .update(jobs)
@@ -51,27 +51,32 @@ export async function enqueueJob(input: EnqueueInput, exec: Executor = db): Prom
       ...(input.payload ?? {}),
       ...(input.sourceVersion != null ? { sourceVersion: input.sourceVersion } : {})
     };
-    await tx.insert(jobs).values({
-      workspaceId: input.workspaceId ?? null,
-      spaceId: input.spaceId ?? null,
-      entityType: input.entityType,
-      entityId: input.entityId ?? null,
-      type: input.type,
-      payload,
-      sourceVersion: input.sourceVersion ?? null,
-      dedupeKey: dedupeKey ?? null,
-      runAfter: sql`now() + (${input.runAfterSeconds ?? 0} || ' seconds')::interval`,
-      priority: input.priority ?? 100
-    });
+    const [row] = await tx
+      .insert(jobs)
+      .values({
+        workspaceId: input.workspaceId ?? null,
+        spaceId: input.spaceId ?? null,
+        entityType: input.entityType,
+        entityId: input.entityId ?? null,
+        type: input.type,
+        payload,
+        sourceVersion: input.sourceVersion ?? null,
+        dedupeKey: dedupeKey ?? null,
+        runAfter: sql`now() + (${input.runAfterSeconds ?? 0} || ' seconds')::interval`,
+        priority: input.priority ?? 100
+      })
+      .returning({ id: jobs.id });
+    return { jobId: row.id };
   };
 
   if (exec === db) {
+    let jobId = '';
     await db.transaction(async (tx) => {
-      await doEnqueue(tx);
+      ({ jobId } = await doEnqueue(tx));
     });
-  } else {
-    await doEnqueue(exec);
+    return { jobId };
   }
+  return doEnqueue(exec);
 }
 
 async function processPageLlm(job: any) {
@@ -268,7 +273,12 @@ export async function runOneJob(workerId = `worker-${process.pid}`): Promise<boo
         }
         throw err;
       }
-      await consolidateCandidates(job.space_id!, ai);
+      await consolidateCandidates(job.space_id!, ai, async (p) => {
+        // Phase B (B1.3): surface clustering progress on the job for the UI to poll.
+        await db.execute(
+          sql`UPDATE jobs SET progress = ${JSON.stringify(p)}::jsonb, updated_at = now() WHERE id = ${job.id}`
+        );
+      });
     } else if (job.type === 'knowledge.evaluate_lifecycle') {
       // Phase 5 (F4): daily lifecycle evaluation. Generates Suggestions only
       // (never archives), so failing mid-run is safe to retry.
@@ -302,9 +312,56 @@ export async function runOneJob(workerId = `worker-${process.pid}`): Promise<boo
   return true;
 }
 
-export function startJobRunner() {
+let timer: NodeJS.Timeout | null = null;
+let runningJob: Promise<boolean> | null = null;
+
+/**
+ * Reset "running" jobs left behind by an interrupted process (SIGKILL / crash)
+ * so they get picked up again on the next poll instead of blocking new work
+ * (Gate: 僵尸 job 回收). A job is considered stuck once it has been "running"
+ * longer than the 5-minute safety window.
+ */
+export async function recoverZombieJobs(): Promise<number> {
+  const res = await db.execute<any>(sql`
+    UPDATE jobs
+    SET status = 'pending', locked_by = NULL, locked_at = NULL, updated_at = now()
+    WHERE status = 'running' AND locked_at < now() - interval '5 minutes'
+    RETURNING id
+  `);
+  return res.rows.length;
+}
+
+export function startJobRunner(): void {
   if (process.env.NODE_ENV === 'test') return;
-  setInterval(() => {
-    runOneJob().catch((err) => console.error('job runner error', err));
-  }, 3000).unref();
+  // Recover any jobs left "running" by a previous (crashed) process.
+  void recoverZombieJobs()
+    .then((n) => {
+      if (n > 0) console.log(`[job-runner] recovered ${n} zombie job(s)`);
+    })
+    .catch((err) => console.error('[job-runner] zombie recovery failed', err instanceof Error ? err.message : err));
+
+  timer = setInterval(() => {
+    const job = runOneJob();
+    runningJob = job;
+    void job
+      .catch((err) => console.error('job runner error', err))
+      .finally(() => {
+        runningJob = null;
+      });
+  }, 3000);
+  timer.unref();
+}
+
+/** Stop the poll loop and wait (bounded) for an in-flight job to finish. */
+export async function stopJobRunner(): Promise<void> {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+  // Give the currently-running job up to 15s to finish before we exit.
+  const deadline = Date.now() + 15000;
+  while (runningJob && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  runningJob = null;
 }

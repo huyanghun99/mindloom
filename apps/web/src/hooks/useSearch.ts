@@ -15,7 +15,9 @@ export type SearchResult = {
  * queries never re-hit the server (and thus never re-trigger a remote
  * embedding). Works together with the server-side query-embedding cache.
  */
-const resultCache = new Map<string, SearchResult[]>();
+const CACHE_TTL_MS = 60_000; // Phase C2.4 (U10): results go stale after 60s.
+type CacheVal = { value: SearchResult[]; ts: number };
+const resultCache = new Map<string, CacheVal>();
 
 export function useSearch(params: { workspaceId: string; spaceId?: string }) {
   const [query, setQuery] = useState('');
@@ -38,7 +40,10 @@ export function useSearch(params: { workspaceId: string; spaceId?: string }) {
 
     const cacheKey = `${mode}:${scope}:${q}`;
     const hit = resultCache.get(cacheKey);
-    if (hit) { setResults(hit); setLoading(false); setError(null); return; }
+    if (hit) {
+      if (Date.now() - hit.ts < CACHE_TTL_MS) { setResults(hit.value); setLoading(false); setError(null); return; }
+      resultCache.delete(cacheKey); // expired — fall through to a fresh request
+    }
 
     setLoading(true);
     setError(null);
@@ -54,7 +59,7 @@ export function useSearch(params: { workspaceId: string; spaceId?: string }) {
         }),
         signal: ctrl.signal
       });
-      resultCache.set(cacheKey, res.results);
+      resultCache.set(cacheKey, { value: res.results, ts: Date.now() });
       if (!ctrl.signal.aborted) setResults(res.results);
     } catch (err) {
       if ((err as Error).name !== 'AbortError') setError(err as Error);

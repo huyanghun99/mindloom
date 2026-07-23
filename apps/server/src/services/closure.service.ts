@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import { db } from '../db/client';
-import { wikiTopics, topicSources, documentChunks, spaces, projectClosurePackages, topicOperations, knowledgeEdges } from '@mindloom/db';
+import { wikiTopics, topicSources, spaces, topicOperations } from '@mindloom/db';
 import { closurePackageSchema, type ClosurePackage, type CitationRef, type TopicSynthesis } from '@mindloom/shared';
 import { canEditSpace } from './permission.service';
 import { recordActivity } from './activity.service';
@@ -142,7 +142,7 @@ export async function generateClosurePackage(spaceId: string, _ai?: AiProvider):
   // Area/Resource Space in the same workspace (if one exists).
   const targetRows = await db.execute<any>(sql`
     SELECT id, space_kind FROM spaces
-    WHERE workspace_id = ${space.workspace_id} AND id <> ${spaceId}::uuid
+    WHERE workspace_id = ${space.workspaceId} AND id <> ${spaceId}::uuid
       AND space_kind IN ('area','resource') AND lifecycle_status <> 'archived'
   `);
   const recommendedPromotions: ClosurePackage['recommendedPromotions'] = reusable.map((r) => {
